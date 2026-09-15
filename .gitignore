@@ -1,0 +1,15 @@
+.build/
+dist/
+.DS_Store
+release-staging/
+.release-staging/
+*.dmg
+*.p12
+*.cer
+*.p8
+*.key
+*.pem
+*.provisionprofile
+*.mobileprovision
+DerivedData/
+.Package.resolved

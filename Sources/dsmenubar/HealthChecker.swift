@@ -1,0 +1,153 @@
+// SPDX-FileCopyrightText: Copyright 2026 James Martin
+// SPDX-License-Identifier: MIT
+
+import Foundation
+
+// MARK: - HealthChecker
+
+/// Polls the ds4-server HTTP endpoint (/v1/models) to detect readiness and
+/// ongoing health.
+///
+/// This class is *stateless with respect to the UI* — it reports results via
+/// closures so the owning ServerManager can publish @Published status changes
+/// on the main actor.
+final class HealthChecker {
+    // MARK: - Callbacks (wired by ServerManager)
+
+    /// Called when a health check succeeds for a server that was starting up.
+    /// The orchestrator resolves the PID to report in the .running status.
+    var onHealthSuccess: (() -> Void)?
+
+    /// Called when a health check fails while the server was already running.
+    var onUnreachable: ((String) -> Void)?
+
+    /// Called once per start when a startup has been running for
+    /// `stallAdvisoryInterval` without the listener coming up. This is an
+    /// advisory only — nothing is terminated — so the user learns that a long
+    /// startup is still in progress instead of watching an unchanging status.
+    var onStartupStalled: (() -> Void)?
+
+    /// A closure that can return whether the server is still in a starting-up
+    /// state (.starting or .restarting).
+    var isStartingUp: (() -> Bool)?
+
+    /// A closure that can return whether the server was in .running state.
+    var isRunning: (() -> Bool)?
+
+    // MARK: - Private state
+
+    /// Poll cadence while starting/restarting — fast, so the UI confirms
+    /// "running" promptly once the server answers.
+    private static let fastInterval = 2
+    /// Poll cadence once a run has been confirmed healthy.
+    private static let steadyInterval = 10
+    /// How long a startup may run before the user gets an advisory. Chosen to be
+    /// well past a normal large-model load, since it must never read as a
+    /// deadline — a startup past this point is still perfectly valid.
+    static let stallAdvisoryInterval: TimeInterval = 600
+
+    private var healthTimer: DispatchSourceTimer?
+    private var healthURL: URL?
+    private var startupBegan: Date?
+    private var stallAdvisoryPosted = false
+
+    /// Bumped whenever polling starts, stops, or changes cadence. A response
+    /// carrying a superseded generation is discarded, so a request still in
+    /// flight when the run it belonged to ended cannot act on the one that
+    /// replaced it — in particular, a slow failure landing after a success can
+    /// no longer terminate a server that was just confirmed healthy.
+    ///
+    /// This and every other field here are touched only on the main queue.
+    private var generation = 0
+
+    // MARK: - Polling control
+
+    /// Begin polling `url` for readiness. There is deliberately no startup
+    /// deadline: ds4-server loads the engine and requests Metal residency before
+    /// opening its HTTP listener, and that duration depends heavily on model,
+    /// memory pressure, and the Mac's current state.
+    func startPolling(url: URL) {
+        healthURL = url
+        startupBegan = Date()
+        stallAdvisoryPosted = false
+        scheduleHealthTimer(interval: Self.fastInterval)
+    }
+
+    /// Stop all timers and reset state. Called when the server is stopped or
+    /// restarted.
+    func stop() {
+        generation &+= 1
+        healthTimer?.cancel(); healthTimer = nil
+        healthURL = nil
+        startupBegan = nil
+        stallAdvisoryPosted = false
+    }
+
+    /// Recreate the health-poll timer at the given cadence. `firstDeadline`
+    /// defaults to now for startup; after readiness, the next poll is delayed so
+    /// the app does not immediately issue a duplicate request.
+    private func scheduleHealthTimer(interval: Int, firstDeadline: DispatchTime = .now()) {
+        generation &+= 1
+        healthTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .background))
+        timer.schedule(deadline: firstDeadline, repeating: .seconds(interval),
+                       leeway: .seconds(max(1, interval / 2)))
+        timer.setEventHandler { [weak self] in
+            self?.checkHealth()
+        }
+        timer.resume()
+        healthTimer = timer
+    }
+
+    // MARK: - Health check
+
+    /// The timer fires on a background queue, so the request is issued from the
+    /// main queue instead: every field this reads or writes lives there, and the
+    /// generation stamped on the request has to be the one current at issue time.
+    private func checkHealth() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.issueHealthRequest()
+        }
+    }
+
+    private func issueHealthRequest() {
+        guard let url = healthURL else { return }
+        let issued = generation
+        let req = URLRequest(url: url, timeoutInterval: 2)
+        URLSession.shared.dataTask(with: req) { [weak self] _, response, error in
+            guard let s = self else { return }
+            DispatchQueue.main.async {
+                // Superseded by a stop, a restart, or a cadence change.
+                guard issued == s.generation else { return }
+                if let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 {
+                    // Server is alive and answering.
+                    if s.isStartingUp?() == true {
+                        // PID is resolved by the orchestrator; we just signal success.
+                        s.startupBegan = nil
+                        s.onHealthSuccess?()
+                        s.scheduleHealthTimer(
+                            interval: Self.steadyInterval,
+                            firstDeadline: .now() + .seconds(Self.steadyInterval))
+                    }
+                } else {
+                    let errMsg = error.map { $0.localizedDescription }
+                        ?? "HTTP \(String(describing: (response as? HTTPURLResponse)?.statusCode))"
+                    // If it was running and now unreachable, report failure.
+                    if s.isRunning?() == true {
+                        s.onUnreachable?("unreachable: \(errMsg)")
+                    }
+                    // If still starting, keep trying. Model loading and Metal
+                    // residency happen before the listener exists. Once past the
+                    // advisory interval, say so once — and keep polling.
+                    if s.isStartingUp?() == true, !s.stallAdvisoryPosted,
+                       let began = s.startupBegan,
+                       Date().timeIntervalSince(began) >= Self.stallAdvisoryInterval {
+                        s.stallAdvisoryPosted = true
+                        s.onStartupStalled?()
+                    }
+                }
+            }
+        }.resume()
+    }
+}

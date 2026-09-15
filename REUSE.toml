@@ -1,0 +1,13 @@
+version = 1
+
+[[annotations]]
+path = [
+    ".gitignore",
+    "Makefile",
+    "README.md",
+    "Resources/AppIcon.icns",
+    "Resources/Info.plist",
+    "docs/images/*.png",
+]
+SPDX-FileCopyrightText = "Copyright 2026 James Martin"
+SPDX-License-Identifier = "MIT"

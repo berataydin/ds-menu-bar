@@ -1,0 +1,278 @@
+// SPDX-FileCopyrightText: Copyright 2026 James Martin
+// SPDX-License-Identifier: MIT
+
+import Foundation
+import XCTest
+
+@testable import dsmenubar
+
+final class ProcessManagerTests: XCTestCase {
+    @MainActor
+    func testRunningProcessRotatesLogAtConfiguredSize() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-live-log-rotate-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let serverURL = directory.appendingPathComponent("ds4-server")
+        let script = """
+        #!/bin/sh
+        /bin/sleep 0.2
+        /usr/bin/head -c 1200000 /dev/zero
+        exec /bin/sleep 10
+        """
+        try Data(script.utf8).write(to: serverURL)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: serverURL.path)
+
+        let modelURL = directory.appendingPathComponent("model.gguf")
+        try makeGGUF(architecture: "glm5-next").write(to: modelURL)
+        let logURL = directory.appendingPathComponent("server.log")
+        let backupURL = directory.appendingPathComponent("server.log.1")
+
+        var configuration = ServerConfiguration.Config()
+        configuration.serverPath = serverURL.path
+        configuration.modelPath = modelURL.path
+        configuration.logPath = logURL.path
+        configuration.logMaxSizeMB = 1
+
+        let manager = ProcessManager()
+        let terminated = expectation(description: "server terminated")
+        manager.onTerminated = { _ in terminated.fulfill() }
+        defer {
+            if manager.isProcessRunning {
+                manager.terminate()
+            }
+        }
+
+        XCTAssertNotNil(manager.launch(configuration: configuration))
+        let deadline = Date().addingTimeInterval(4)
+        while !fileManager.fileExists(atPath: backupURL.path), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+
+        XCTAssertTrue(fileManager.fileExists(atPath: backupURL.path))
+        XCTAssertLessThanOrEqual(
+            (try fileManager.attributesOfItem(atPath: backupURL.path)[.size] as? NSNumber)?
+                .intValue ?? .max,
+            1024 * 1024
+        )
+
+        manager.terminate()
+        await fulfillment(of: [terminated], timeout: 2)
+    }
+
+    func testRotateLogRetainsNewestBytesAndKeepsActiveDescriptorValid() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-log-rotate-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let log = directory.appendingPathComponent("server.log")
+        let backup = directory.appendingPathComponent("server.log.1")
+        try Data("0123456789".utf8).write(to: log)
+        try Data("old backup".utf8).write(to: backup)
+
+        let activeFD = open(log.path, O_WRONLY | O_APPEND)
+        guard activeFD >= 0 else {
+            XCTFail("Unable to open test log")
+            return
+        }
+        let activeWriter = FileHandle(fileDescriptor: activeFD, closeOnDealloc: true)
+        defer { try? activeWriter.close() }
+
+        try ProcessManager.rotateLog(
+            at: log.path,
+            maximumBytes: 6,
+            activeFileDescriptor: activeFD
+        )
+        try activeWriter.write(contentsOf: Data("new output".utf8))
+
+        XCTAssertEqual(String(decoding: try Data(contentsOf: backup), as: UTF8.self), "456789")
+        XCTAssertEqual(String(decoding: try Data(contentsOf: log), as: UTF8.self), "new output")
+    }
+
+    func testClearLogCollectionTruncatesCurrentLogAndRemovesBackup() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-log-clear-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let log = directory.appendingPathComponent("server.log")
+        let backup = directory.appendingPathComponent("server.log.1")
+        try Data("current log".utf8).write(to: log)
+        try Data("rotated log".utf8).write(to: backup)
+        let activeFD = open(log.path, O_WRONLY | O_APPEND)
+        guard activeFD >= 0 else {
+            XCTFail("Unable to open test log")
+            return
+        }
+        let activeWriter = FileHandle(fileDescriptor: activeFD, closeOnDealloc: true)
+        defer { try? activeWriter.close() }
+
+        try ProcessManager().clearLogCollection(logPath: log.path)
+        try activeWriter.write(contentsOf: Data("new output".utf8))
+
+        XCTAssertEqual(String(decoding: try Data(contentsOf: log), as: UTF8.self), "new output")
+        XCTAssertFalse(fileManager.fileExists(atPath: backup.path))
+    }
+
+    func testClearLogCollectionAllowsMissingFiles() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-missing-log-\(UUID().uuidString)")
+            .path
+
+        XCTAssertNoThrow(try ProcessManager().clearLogCollection(logPath: path))
+    }
+
+    func testDeleteTraceFileRemovesOnlyARegularFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-trace-clear-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let trace = directory.appendingPathComponent("trace.jsonl")
+        try Data("private trace".utf8).write(to: trace)
+
+        try ProcessManager().deleteTraceFile(tracePath: trace.path)
+
+        XCTAssertFalse(fileManager.fileExists(atPath: trace.path))
+        XCTAssertThrowsError(try ProcessManager().deleteTraceFile(tracePath: directory.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: directory.path))
+    }
+
+    func testRegularFileChecksRejectDirectoriesAndAcceptFileSymlinks() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-files-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        XCTAssertFalse(fileManager.isReadableRegularFile(atPath: directory.path))
+        XCTAssertFalse(fileManager.isExecutableRegularFile(atPath: directory.path))
+
+        let file = directory.appendingPathComponent("model.gguf")
+        try Data("model".utf8).write(to: file)
+        let link = directory.appendingPathComponent("model-link.gguf")
+        try fileManager.createSymbolicLink(at: link, withDestinationURL: file)
+
+        XCTAssertTrue(fileManager.isReadableRegularFile(atPath: file.path))
+        XCTAssertTrue(fileManager.isReadableRegularFile(atPath: link.path))
+    }
+
+    func testLaunchRejectsAnExecutableDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-server-directory-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        var configuration = ServerConfiguration.Config()
+        configuration.serverPath = directory.path
+
+        let manager = ProcessManager()
+        var failure: String?
+        manager.onLaunchFailure = { failure = $0 }
+
+        XCTAssertNil(manager.launch(configuration: configuration))
+        XCTAssertEqual(
+            failure,
+            "ds4-server not found or not executable at \(directory.path)"
+        )
+    }
+
+    func testLaunchResolvesRelativeModelAndSkipsDisabledVisionPreflight() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-process-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let serverURL = directory.appendingPathComponent("ds4-server")
+        try Data("#!/bin/sh\nsleep 5\n".utf8).write(to: serverURL)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: serverURL.path)
+
+        let modelURL = directory.appendingPathComponent("model.gguf")
+        try makeGGUF(architecture: "glm5-next").write(to: modelURL)
+
+        var configuration = ServerConfiguration.Config()
+        configuration.serverPath = serverURL.path
+        configuration.modelPath = modelURL.lastPathComponent
+        configuration.host = "["
+        configuration.visionPath = "missing-vision.gguf"
+        configuration.visionEnabled = false
+
+        let manager = ProcessManager()
+        var failure: String?
+        manager.onLaunchFailure = { failure = $0 }
+
+        XCTAssertNil(manager.launch(configuration: configuration))
+        XCTAssertEqual(
+            failure,
+            "Unable to construct a health-check URL for host ["
+        )
+    }
+
+    func testUnknownModelSkipsUnusedExternalSupportPreflight() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-process-unknown-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let serverURL = directory.appendingPathComponent("ds4-server")
+        try Data("#!/bin/sh\nsleep 5\n".utf8).write(to: serverURL)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: serverURL.path)
+
+        let modelURL = directory.appendingPathComponent("unknown.gguf")
+        try makeGGUF(architecture: "qwen3-next").write(to: modelURL)
+
+        for mode in [MTPMode.external, .dspark] {
+            var configuration = ServerConfiguration.Config()
+            configuration.serverPath = serverURL.path
+            configuration.modelPath = modelURL.path
+            configuration.mtpMode = mode
+            configuration.mtpPath = "missing-support.gguf"
+            configuration.host = "["
+
+            let manager = ProcessManager()
+            var failure: String?
+            manager.onLaunchFailure = { failure = $0 }
+
+            XCTAssertNil(manager.launch(configuration: configuration))
+            XCTAssertEqual(
+                failure,
+                "Unable to construct a health-check URL for host [",
+                mode.rawValue
+            )
+        }
+    }
+
+    private func makeGGUF(architecture: String) -> Data {
+        var data = Data([0x47, 0x47, 0x55, 0x46])
+        append(UInt32(3), to: &data)
+        append(UInt64(0), to: &data)
+        append(UInt64(1), to: &data)
+        append(utf8: "general.architecture", to: &data)
+        append(UInt32(8), to: &data)
+        append(utf8: architecture, to: &data)
+        return data
+    }
+
+    private func append(utf8 value: String, to data: inout Data) {
+        let bytes = Array(value.utf8)
+        append(UInt64(bytes.count), to: &data)
+        data.append(contentsOf: bytes)
+    }
+
+    private func append(_ value: UInt32, to data: inout Data) {
+        data.append(contentsOf: withUnsafeBytes(of: value.littleEndian, Array.init))
+    }
+
+    private func append(_ value: UInt64, to data: inout Data) {
+        data.append(contentsOf: withUnsafeBytes(of: value.littleEndian, Array.init))
+    }
+}

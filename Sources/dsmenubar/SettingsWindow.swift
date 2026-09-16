@@ -305,6 +305,13 @@ struct SettingsView: View {
         )
     }
 
+    private var performanceDisplayBinding: Binding<Bool> {
+        Binding(
+            get: { server.showsPerformanceInMenuBar },
+            set: { server.setShowsPerformanceInMenuBar($0) }
+        )
+    }
+
     private var applyTitle: String {
         switch server.status {
         case .starting, .running, .restarting:
@@ -797,6 +804,11 @@ struct SettingsView: View {
             Section("Application") {
                 Toggle("Launch at login", isOn: launchAtLoginBinding)
                     .help("Changes take effect immediately.")
+                Toggle(
+                    "Show Prefill and Generation speeds in menu bar",
+                    isOn: performanceDisplayBinding
+                )
+                .help("Displays P for Prefill and G for Generation token rates.")
                 LabeledContent("Platform") {
                     Text("macOS • Apple silicon • Metal")
                         .foregroundStyle(.secondary)

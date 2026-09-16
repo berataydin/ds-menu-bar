@@ -47,6 +47,9 @@ final class ProcessManager {
     /// ServerManager adds the launch source and chooses the user-facing route.
     var onLaunchFailure: ((String) -> Void)?
 
+    /// Called when ds4-server's log reports a request phase or average rate.
+    var onPerformanceChange: ((ServerPerformance) -> Void)?
+
     // MARK: - Private state
 
     private var process: Process?
@@ -55,6 +58,13 @@ final class ProcessManager {
     private var logSizeCheckScheduled = false
     private var logMonitorID = UUID()
     private var logRotationMonitorID: UUID?
+    private var activeLogPath: String?
+    private var performanceMonitoringEnabled = false
+    private let performanceReader = ServerPerformanceLogReader()
+    private let performanceQueue = DispatchQueue(
+        label: "com.jiiim.ds-menu-bar.performance-log",
+        qos: .utility
+    )
     private let logRotationQueue = DispatchQueue(
         label: "com.jiiim.ds-menu-bar.log-rotation",
         qos: .utility
@@ -470,6 +480,13 @@ final class ProcessManager {
         stopLogMonitoring()
         let monitorID = UUID()
         logMonitorID = monitorID
+        activeLogPath = path
+
+        if performanceMonitoringEnabled {
+            performanceQueue.async { [performanceReader] in
+                performanceReader.start(path: path)
+            }
+        }
 
         let monitorFileDescriptor = dup(fileDescriptor)
         guard monitorFileDescriptor >= 0 else {
@@ -484,6 +501,7 @@ final class ProcessManager {
         )
         source.setEventHandler { [weak self, weak monitoredProcess] in
             guard let self, let monitoredProcess else { return }
+            self.readPerformanceUpdates(monitorID: monitorID)
             self.scheduleLogSizeCheck(
                 monitorID: monitorID,
                 path: path,
@@ -505,6 +523,62 @@ final class ProcessManager {
         logSizeCheckScheduled = false
         logMonitorID = UUID()
         logRotationMonitorID = nil
+        activeLogPath = nil
+        performanceQueue.async { [performanceReader] in
+            performanceReader.stop()
+        }
+        // Nothing is reported while the display is off, so a launch or an exit
+        // does not need to announce an idle nobody is showing.
+        if performanceMonitoringEnabled {
+            onPerformanceChange?(.idle)
+        }
+    }
+
+    /// Enable or disable incremental performance parsing without changing the
+    /// server process. Enabling during a request starts at EOF and receives the
+    /// next complete progress record rather than presenting stale log history.
+    func setPerformanceMonitoring(_ enabled: Bool) {
+        guard enabled != performanceMonitoringEnabled else { return }
+        performanceMonitoringEnabled = enabled
+
+        guard enabled else {
+            performanceQueue.async { [performanceReader] in
+                performanceReader.stop()
+            }
+            onPerformanceChange?(.idle)
+            return
+        }
+
+        // With no server running there is nothing to read yet; the flag above
+        // is enough, because startLogMonitoring opens the reader at launch.
+        guard let path = activeLogPath else { return }
+        performanceQueue.async { [performanceReader] in
+            performanceReader.start(path: path)
+        }
+    }
+
+    private func readPerformanceUpdates(monitorID: UUID) {
+        guard performanceMonitoringEnabled else { return }
+        performanceQueue.async { [weak self, performanceReader] in
+            let updates = performanceReader.readAvailable()
+            guard !updates.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self,
+                      self.performanceMonitoringEnabled,
+                      self.logMonitorID == monitorID
+                else { return }
+                for update in updates {
+                    self.onPerformanceChange?(update)
+                }
+            }
+        }
+    }
+
+    private func rewindPerformanceReader() {
+        guard performanceMonitoringEnabled else { return }
+        performanceQueue.async { [performanceReader] in
+            performanceReader.rewind()
+        }
     }
 
     /// A server suspended for rotation must be resumed before termination. The
@@ -592,6 +666,7 @@ final class ProcessManager {
                         at: path,
                         activeFileDescriptor: fileDescriptor
                     )
+                    self.rewindPerformanceReader()
                 } catch {
                     os_log(
                         .error,
@@ -720,6 +795,7 @@ final class ProcessManager {
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
             defer { try? handle.close() }
             try handle.truncate(atOffset: 0)
+            rewindPerformanceReader()
         }
 
         let rotatedPath = path + ".1"

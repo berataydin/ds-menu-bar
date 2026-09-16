@@ -5,71 +5,52 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
-/// SwiftUI menubar app. The entire UI is a `MenuBarExtra`; a `Settings` scene
-/// hosts the settings window, shown on demand (it does not open at launch).
-@main
-struct DSMenuBarApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+private struct AppSettingsScene: Scene {
+    let server: ServerManager
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuContent(server: appDelegate.server)
-        } label: {
-            StatusIcon(server: appDelegate.server)
-        }
-
-        Window("About DS Menu Bar", id: "about") {
-            AboutView()
-        }
-        .windowResizability(.contentSize)
-        .defaultLaunchBehavior(.suppressed)
-        // First-ever placement, at the standard About panel's spot; every
-        // later placement is handled by the close-time re-positioning in
-        // AboutWindowConfigurator (same rule — see there for the details).
-        .defaultWindowPlacement { content, context in
-            let visible = context.defaultDisplay.visibleRect
-            let size = content.sizeThatFits(.unspecified)
-            return WindowPlacement(
-                CGPoint(
-                    x: visible.midX - size.width / 2,
-                    y: visible.minY + visible.height / 5
-                ),
-                size: size
-            )
-        }
-        .restorationBehavior(.disabled)
-        .commands {
-            // Replace AppKit's auto-generated "About DS Menu Bar" item (which
-            // opens the standard About panel) so the app-menu route and the
-            // menu-bar-dropdown route both open the same custom About window.
-            CommandGroup(replacing: .appInfo) {
-                Button("About DS Menu Bar") {
-                    openWindow(id: "about")
-                    AppActivation.windowOpened()
-                }
-            }
-        }
-
         Settings {
-            SettingsView(server: appDelegate.server)
+            SettingsView(server: server)
         }
     }
-
-    @Environment(\.openWindow) private var openWindow
 }
 
-// MARK: - App Delegate
-
+@main
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
-    UNUserNotificationCenterDelegate {
+    @preconcurrency UNUserNotificationCenterDelegate {
+    /// macOS 26's scene representation API keeps the SwiftUI Settings scene
+    /// available to this AppKit lifecycle.
+    private lazy var settingsScene: NSHostingSceneRepresentation<AppSettingsScene> =
+        NSHostingSceneRepresentation {
+            AppSettingsScene(server: server)
+        }
+
     /// Owned here (not as App-struct state) so it's available to `body` and so
     /// `applicationWillTerminate` can reap the child process.
     let server = ServerManager()
 
+    private var statusBarController: StatusBarController?
+    private var aboutWindowController: AboutWindowController?
     private var manualFailureAlertShowing = false
     private var initialSetupWindowController: InitialSetupWindowController?
     private var initialSetupCompleted = false
     private var notificationAuthorizationRequested = false
+
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.run()
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        MainMenu.install(on: NSApplication.shared)
+        NSApp.addSceneRepresentation(settingsScene)
+        SettingsNavigation.install { [weak self] in
+            self?.settingsScene.environment.openSettings()
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // .accessory: no dock icon, but the app can still bring its settings
@@ -78,6 +59,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // Cmd-Tab can find the app, and back once the last window closes.
         NSApp.setActivationPolicy(.accessory)
         AppActivation.install()
+        statusBarController = StatusBarController(
+            server: server,
+            openSettings: {
+                SettingsNavigation.open(.general)
+                AppActivation.windowOpened()
+            },
+            openAbout: { [weak self] in self?.openAbout() }
+        )
 
         server.onLaunchFailure = { [weak self] failure in
             guard failure.source == .manual else { return }
@@ -243,6 +232,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 AppActivation.windowOpened()
             }
         }
+    }
+
+    // MainMenu dispatches to nil, so these are reached through the responder
+    // chain: NSApp forwards unhandled application actions to its delegate.
+    // The status item's menu reaches the same windows through the closures it
+    // was constructed with.
+
+    @objc func showAboutWindow(_ sender: Any?) {
+        openAbout()
+    }
+
+    @objc func showSettingsWindow(_ sender: Any?) {
+        openSettings(destination: .general)
+    }
+
+    private func openAbout() {
+        if aboutWindowController == nil {
+            aboutWindowController = AboutWindowController()
+        }
+        aboutWindowController?.showWindow(nil)
+        AppActivation.windowOpened()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

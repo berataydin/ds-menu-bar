@@ -15,10 +15,12 @@ import ServiceManagement
 final class ServerConfiguration {
     private var values = Config()
     private let defaults: UserDefaults
+    private(set) var showsPerformanceInMenuBar: Bool
     private let log = OSLog(subsystem: "com.jiiim.ds-menu-bar", category: "config")
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        showsPerformanceInMenuBar = defaults.bool(forKey: Self.performanceDisplayKey)
         loadConfig()
     }
 
@@ -140,6 +142,7 @@ final class ServerConfiguration {
     // MARK: Persistence
 
     private static let configKey = "dsmenubar.config"
+    private static let performanceDisplayKey = "dsmenubar.showPerformanceInMenuBar"
 
     var needsInitialSetup: Bool {
         guard defaults.object(forKey: Self.configKey) != nil else { return true }
@@ -208,6 +211,13 @@ final class ServerConfiguration {
         let warning = applyLoginItem()?.message
         persistConfig()
         return LoginItemUpdate(isEnabled: values.launchAtLogin, warning: warning)
+    }
+
+    /// Persist this app-only display preference immediately. It does not alter
+    /// ds4-server's command line and must not enter the Apply & Restart path.
+    func setShowsPerformanceInMenuBar(_ requested: Bool) {
+        showsPerformanceInMenuBar = requested
+        defaults.set(requested, forKey: Self.performanceDisplayKey)
     }
 
     /// Persist the current configuration and apply launch-at-login. Login-item

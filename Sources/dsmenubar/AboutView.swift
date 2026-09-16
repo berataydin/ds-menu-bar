@@ -43,59 +43,50 @@ struct AboutView: View {
         .padding(20)
         .frame(width: 260)
         .fixedSize()
-        .background(AboutWindowConfigurator())
     }
 }
 
-/// Strips the About window down to a fixed, non-resizable, non-minimizable
-/// panel with no title text, matching the system About panel's chrome, and
-/// keeps it permanently centered like the system About panel.
-private struct AboutWindowConfigurator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            guard let window = view.window else { return }
-            window.styleMask.remove([.resizable, .miniaturizable])
-            window.titleVisibility = .hidden
+/// Hosts the singleton SwiftUI About view in a standard AppKit window. This is
+/// used because macOS 26's NSHostingSceneRepresentation does not present a
+/// `Window` scene through `openWindow(id:)`.
+@MainActor
+final class AboutWindowController: NSWindowController, NSWindowDelegate {
+    init() {
+        let content = NSHostingController(rootView: AboutView())
+        let window = NSWindow(contentViewController: content)
+        window.styleMask = [.titled, .closable]
+        // Titled but not shown, matching the standard About panel. The title
+        // is still what the Window menu lists this window under.
+        window.title = "About DS Menu Bar"
+        window.titleVisibility = .hidden
+        window.isReleasedWhenClosed = false
+        content.view.layoutSubtreeIfNeeded()
+        window.setContentSize(content.view.fittingSize)
 
-            // The Window(id:) scene reuses this one NSWindow across
-            // close/reopen, retaining whatever position the user dragged it
-            // to. Re-positioning at reopen time is always one frame too late
-            // — the window is already on screen, so it visibly jumps.
-            // Instead, park the window back at the standard spot as it
-            // closes: the move is invisible while hidden, and the next
-            // opening starts out placed. (Deferred a turn — at willClose the
-            // window is still on screen.)
-            //
-            // The spot replicates NSApp.orderFrontStandardAboutPanel():
-            // horizontally centered, top edge one fifth of the visible-frame
-            // height below the menu bar. Measured by probing the standard
-            // panel with credits of varying length — the top offset stayed
-            // fixed (visibleFrame.height / 5, to the pixel) while panel
-            // heights varied, so the rule is height-independent. This is not
-            // NSWindow.center(), which places the top at a quarter of the
-            // *leftover* space and thus shifts with height. The scene's
-            // .defaultWindowPlacement applies the same rule to the
-            // first-ever appearance, so every showing lands on this spot.
-            NotificationCenter.default.addObserver(
-                forName: NSWindow.willCloseNotification, object: window, queue: .main
-            ) { [weak window] _ in
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let window,
-                              let screen = window.screen ?? NSScreen.main else { return }
-                        let area = screen.visibleFrame
-                        let frame = window.frame
-                        window.setFrameOrigin(NSPoint(
-                            x: area.midX - frame.width / 2,
-                            y: area.maxY - area.height / 5 - frame.height
-                        ))
-                    }
-                }
-            }
-        }
-        return view
+        super.init(window: window)
+        window.delegate = self
+        park(window)
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window else { return }
+            park(window)
+        }
+    }
+
+    private func park(_ window: NSWindow) {
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        let area = screen.visibleFrame
+        let frame = window.frame
+        window.setFrameOrigin(NSPoint(
+            x: area.midX - frame.width / 2,
+            y: area.maxY - area.height / 5 - frame.height
+        ))
+    }
 }

@@ -92,6 +92,101 @@ final class ProcessManagerTests: XCTestCase {
         await fulfillment(of: [terminated], timeout: 2)
     }
 
+    /// Toggling the menu-bar display must not disturb the running server, and
+    /// enabling it mid-request must start at EOF rather than replaying the
+    /// history already in the log.
+    @MainActor
+    func testPerformanceMonitoringTogglesAgainstALiveServer() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-live-performance-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let logURL = directory.appendingPathComponent("server.log")
+        let stepURL = directory.appendingPathComponent("step")
+        let record = "ds4-server: chat ctx=0..10:10 gen=10 decoding chunk=1.0 t/s avg="
+
+        // Writes one record per step file the test drops in, so the log grows
+        // only when the test says so.
+        let serverURL = directory.appendingPathComponent("ds4-server")
+        let script = """
+        #!/bin/sh
+        n=1
+        while [ $n -le 3 ]; do
+            while [ ! -f '\(stepURL.path)'.$n ]; do /bin/sleep 0.02; done
+            echo "\(record)$n.0 t/s 1.0s"
+            n=$((n + 1))
+        done
+        exec /bin/sleep 10
+        """
+        try Data(script.utf8).write(to: serverURL)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: serverURL.path)
+
+        let modelURL = directory.appendingPathComponent("model.gguf")
+        try makeGGUF(architecture: "glm5-next").write(to: modelURL)
+
+        var configuration = ServerConfiguration.Config()
+        configuration.serverPath = serverURL.path
+        configuration.modelPath = modelURL.path
+        configuration.logPath = logURL.path
+
+        let manager = ProcessManager()
+        var updates: [ServerPerformance] = []
+        manager.onPerformanceChange = { updates.append($0) }
+        defer {
+            if manager.isProcessRunning {
+                manager.terminate()
+            }
+        }
+
+        // Step 1 lands while monitoring is off and must never be reported.
+        XCTAssertNotNil(manager.launch(configuration: configuration))
+        try await write(step: 1, at: stepURL, awaiting: 1, in: logURL)
+        XCTAssertEqual(updates, [])
+
+        manager.setPerformanceMonitoring(true)
+        try await write(step: 2, at: stepURL, awaiting: 2, in: logURL)
+        try await settle()
+        XCTAssertEqual(
+            updates,
+            [ServerPerformance(phase: .generation, tokensPerSecond: 2.0)]
+        )
+
+        // Disabling reports idle once and then stays quiet.
+        manager.setPerformanceMonitoring(false)
+        XCTAssertEqual(updates.last, .idle)
+        let afterDisabling = updates.count
+        try await write(step: 3, at: stepURL, awaiting: 3, in: logURL)
+        try await settle()
+        XCTAssertEqual(updates.count, afterDisabling)
+        XCTAssertTrue(manager.isProcessRunning)
+    }
+
+    /// Release the server's next record and wait for it to reach the log.
+    private func write(
+        step: Int,
+        at stepURL: URL,
+        awaiting records: Int,
+        in logURL: URL
+    ) async throws {
+        try Data().write(to: URL(fileURLWithPath: stepURL.path + ".\(step)"))
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+            if log.components(separatedBy: "decoding chunk=").count > records { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Server did not write record \(step)")
+    }
+
+    /// Let the write event, the reader's queue hop, and the hop back to main
+    /// all drain before asserting.
+    private func settle() async throws {
+        try await Task.sleep(for: .milliseconds(300))
+    }
+
     func testRotateLogRetainsNewestBytesAndKeepsActiveDescriptorValid() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("dsmenubar-log-rotate-\(UUID().uuidString)")

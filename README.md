@@ -13,13 +13,15 @@ DS Menu Bar manages one Metal server on the Mac where the app is running. It
 does not manage remote, distributed, Linux, CUDA, or ROCm servers.
 
 <p align="center">
-  <img src="docs/images/menu-bar-menu.png" width="233" alt="DS Menu Bar menu showing server status and controls">
+  <img src="docs/images/menu-bar-menu.png" width="327" alt="DS Menu Bar menu showing generation speed in the menu bar, server status, and controls">
 </p>
 
 ## What it does
 
 - Starts, stops, and monitors `ds4-server`.
 - Shows the server state and process ID in the menu bar.
+- Can show current prefill and generation throughput in a fixed-width menu-bar
+  display.
 - Provides model-aware settings for the server, model, performance, KV cache,
   MTP, and diagnostics.
 - Detects supported DwarfStar GGUF model families and validates related files

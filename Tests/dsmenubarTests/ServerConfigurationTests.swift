@@ -12,6 +12,25 @@ import XCTest
 /// saved configuration.
 final class ServerConfigurationTests: XCTestCase {
 
+    func testPerformanceDisplayPreferencePersistsOutsideServerConfig() throws {
+        let suiteName = "dsmenubar-tests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated defaults")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let configuration = ServerConfiguration(defaults: defaults)
+        let serverConfig = configuration.snapshot()
+        XCTAssertFalse(configuration.showsPerformanceInMenuBar)
+
+        configuration.setShowsPerformanceInMenuBar(true)
+
+        XCTAssertTrue(configuration.showsPerformanceInMenuBar)
+        XCTAssertEqual(configuration.snapshot(), serverConfig)
+        XCTAssertTrue(ServerConfiguration(defaults: defaults).showsPerformanceInMenuBar)
+    }
+
     func testInitialSetupIsPromptedOnlyBeforeItIsCompleted() throws {
         let suiteName = "dsmenubar-tests-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {

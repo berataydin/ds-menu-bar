@@ -49,6 +49,12 @@ final class ServerManager: ObservableObject {
     private let log = OSLog(subsystem: "com.jiiim.ds-menu-bar", category: "orchestrator")
 
     @Published private(set) var status: ServerStatus = .stopped
+    @Published private(set) var performance: ServerPerformance = .idle
+    @Published private(set) var showsPerformanceInMenuBar: Bool
+
+    private var performancePolicy = PerformanceDisplayPolicy()
+    private var performancePublishWorkItem: DispatchWorkItem?
+    private var performanceIdleWorkItem: DispatchWorkItem?
 
     /// Receives one event for each failed launch attempt. The app layer uses
     /// manual events for a foreground alert; non-manual failures are notified
@@ -62,7 +68,9 @@ final class ServerManager: ObservableObject {
     // MARK: - Init
 
     init() {
+        showsPerformanceInMenuBar = config.showsPerformanceInMenuBar
         wireCallbacks()
+        processManager.setPerformanceMonitoring(showsPerformanceInMenuBar)
     }
 
     /// Establish the callback graph so each component reports back to us.
@@ -77,6 +85,10 @@ final class ServerManager: ObservableObject {
 
         processManager.onLaunchFailure = { [weak self] message in
             self?.reportLaunchFailure(message)
+        }
+
+        processManager.onPerformanceChange = { [weak self] performance in
+            self?.receivePerformance(performance)
         }
 
         processManager.onPortAvailable = { [weak self] in
@@ -177,6 +189,18 @@ final class ServerManager: ObservableObject {
 
     /// The server log path, for the menu-bar "Open Log in Console" action.
     var logPath: String { config.logPath }
+
+    /// Apply the menu-bar display preference immediately without restarting the
+    /// managed server. ProcessManager starts or stops its incremental log reader.
+    func setShowsPerformanceInMenuBar(_ requested: Bool) {
+        guard requested != showsPerformanceInMenuBar else { return }
+        config.setShowsPerformanceInMenuBar(requested)
+        showsPerformanceInMenuBar = requested
+        if !requested {
+            apply(performancePolicy.reset(now: Date()))
+        }
+        processManager.setPerformanceMonitoring(requested)
+    }
 
     /// Snapshot used by Settings to edit a draft without mutating the running
     /// process until the user applies it.
@@ -364,6 +388,50 @@ final class ServerManager: ObservableObject {
         processManager.startWhenPortAvailable(host: current.host, port: current.port)
         // When the port is free, onPortAvailable fires → start(source: .restart)
         // → launch + health polling. We keep .restarting until healthy.
+    }
+
+    // MARK: - Performance display
+
+    /// PerformanceDisplayPolicy decides *when* the menu bar may change; this
+    /// side owns the clock, the two timers, and the published value.
+    private func receivePerformance(_ update: ServerPerformance) {
+        guard showsPerformanceInMenuBar else { return }
+        apply(performancePolicy.receive(update, now: Date()))
+    }
+
+    private func apply(_ effects: [PerformanceDisplayPolicy.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .display(let update):
+                performance = update
+
+            case .cancelPublish:
+                performancePublishWorkItem?.cancel()
+                performancePublishWorkItem = nil
+
+            case .schedulePublish(let delay):
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.performancePublishWorkItem = nil
+                    self.apply(self.performancePolicy.publishTimerFired(now: Date()))
+                }
+                performancePublishWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+
+            case .cancelIdle:
+                performanceIdleWorkItem?.cancel()
+                performanceIdleWorkItem = nil
+
+            case .scheduleIdle(let delay):
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.performanceIdleWorkItem = nil
+                    self.apply(self.performancePolicy.idleTimerFired(now: Date()))
+                }
+                performanceIdleWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            }
+        }
     }
 
     // MARK: - Log tail (for crash/error descriptions)

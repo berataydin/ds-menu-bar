@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import AppKit
-import SwiftUI
+import Combine
 
 // MARK: - Status presentation
 
@@ -49,98 +49,222 @@ extension ServerStatus {
     }
 }
 
-// MARK: - Menubar icon
+// MARK: - Menu-bar item
 
-/// The MenuBarExtra label: a star glyph reflecting server state. Rendered as text
-/// so it stays monochrome and adapts to the menubar's light/dark appearance.
-/// While the server is starting/stopping/restarting it alternates ✧↔✦ on a timer.
-struct StatusIcon: View {
-    @ObservedObject var server: ServerManager
-    @Environment(\.openSettings) private var openSettings
-    @State private var blinkOn = false
-    private let blink = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+/// Owns the native NSStatusItem and its menu.
+@MainActor
+final class StatusBarController: NSObject, NSMenuDelegate {
+    private let server: ServerManager
+    private let openSettings: () -> Void
+    private let openAbout: () -> Void
+    private let statusItem: NSStatusItem
+    private var cancellables = Set<AnyCancellable>()
+    private var blinkOn = false
+    private var menuIsOpen = false
 
-    var body: some View {
-        Text(glyph)
-            .onAppear {
-                SettingsNavigation.install { openSettings() }
+    private let serverItem = NSMenuItem(title: "ds4-server", action: nil, keyEquivalent: "")
+    private let statusTextItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let serverActionItem = NSMenuItem(title: "", action: nil, keyEquivalent: "s")
+    private let speedItem = NSMenuItem(
+        title: "Show Speeds in Menu Bar",
+        action: nil,
+        keyEquivalent: ""
+    )
+
+    init(
+        server: ServerManager,
+        openSettings: @escaping () -> Void,
+        openAbout: @escaping () -> Void
+    ) {
+        self.server = server
+        self.openSettings = openSettings
+        self.openAbout = openAbout
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        super.init()
+
+        statusItem.menu = makeMenu()
+        observeServer()
+        updateStatusButton()
+        refreshMenu()
+
+        Timer.publish(every: 0.5, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                blinkOn.toggle()
+                if server.status.isTransitional {
+                    updateStatusButton()
+                }
             }
-            .onReceive(blink) { _ in blinkOn.toggle() }
+            .store(in: &cancellables)
+
     }
 
-    private var glyph: String {
-        guard server.status.isTransitional else { return server.status.steadyGlyph }
-        return blinkOn ? "✦" : "✧"
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+        refreshMenu()
     }
-}
 
-// MARK: - Menubar menu
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+    }
 
-/// Dropdown contents for the MenuBarExtra. Plain `Text` rows render as disabled
-/// (informational) items; `Button`s are the clickable actions.
-struct MenuContent: View {
-    @ObservedObject var server: ServerManager
-    @Environment(\.openSettings) private var openSettings
-    @Environment(\.openWindow) private var openWindow
+    private func makeMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.delegate = self
+        menu.autoenablesItems = false
 
-    var body: some View {
-        Group {
-            Text("ds4-server")
-            Text("Status: \(server.status.menuText)")
-                .foregroundStyle(
-                    server.status.isError ? Color(nsColor: .systemRed) : Color.primary
-                )
+        serverItem.isEnabled = false
+        statusTextItem.isEnabled = false
+        serverActionItem.target = self
+        serverActionItem.action = #selector(toggleServer)
+        serverActionItem.keyEquivalentModifierMask = .command
+        serverActionItem.isEnabled = true
+        speedItem.target = self
+        speedItem.action = #selector(toggleSpeedDisplay)
+        speedItem.isEnabled = true
 
-            Divider()
+        menu.addItem(serverItem)
+        menu.addItem(statusTextItem)
+        menu.addItem(.separator())
+        menu.addItem(serverActionItem)
+        menu.addItem(item("Open Log in Console", action: #selector(openLog)))
+        menu.addItem(speedItem)
+        menu.addItem(.separator())
+        menu.addItem(item("Settings…", action: #selector(showSettings), keyEquivalent: ","))
+        menu.addItem(.separator())
+        menu.addItem(item("About DS Menu Bar", action: #selector(showAbout)))
+        menu.addItem(.separator())
+        menu.addItem(item("Quit DS Menu Bar", action: #selector(quit), keyEquivalent: "q"))
+        return menu
+    }
 
-            Button(server.status.actionTitle, action: toggle)
-                .keyboardShortcut("s")
+    private func item(
+        _ title: String,
+        action: Selector,
+        keyEquivalent: String = ""
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+        item.target = self
+        item.keyEquivalentModifierMask = .command
+        item.isEnabled = true
+        return item
+    }
 
-            Button("Open Log in Console") {
-                ServerLogActions.openInConsole(logPath: server.logPath)
+    /// This fires twice a second while the server generates. Only the status
+    /// button has to keep up with that; the menu is rebuilt in menuWillOpen,
+    /// and while it is open, so a status change lands under the cursor.
+    private func observeServer() {
+        server.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    updateStatusButton()
+                    if menuIsOpen { refreshMenu() }
+                }
             }
+            .store(in: &cancellables)
+    }
 
-            Divider()
-
-            Button("Settings…") {
-                openSettings()
-                AppActivation.windowOpened()
-            }
-            .keyboardShortcut(",")
-
-            Divider()
-
-            Button("About DS Menu Bar") {
-                openWindow(id: "about")
-                AppActivation.windowOpened()
-            }
-
-            Divider()
-
-            Button("Quit DS Menu Bar") {
-                server.stop()
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q")
+    private func updateStatusButton() {
+        guard let button = statusItem.button else { return }
+        let glyph: String
+        if server.status.isTransitional {
+            glyph = blinkOn ? "✦" : "✧"
+        } else {
+            glyph = server.status.steadyGlyph
         }
-        .onAppear {
-            SettingsNavigation.install { openSettings() }
+
+        if server.showsPerformanceInMenuBar {
+            statusItem.length = NSStatusItem.variableLength
+            button.alignment = .center
+            button.attributedTitle = StatusBarTitle.make(
+                glyph: glyph,
+                performance: server.performance
+            )
+        } else {
+            statusItem.length = NSStatusItem.squareLength
+            button.alignment = .center
+            button.title = glyph
         }
+        button.lineBreakMode = .byClipping
+        button.setAccessibilityLabel(accessibilityLabel)
+        button.toolTip = "DS Menu Bar — \(server.status.menuText)"
     }
 
-    /// Mirrors the old MenuBarManager.toggleServer: start from a stopped/errored
-    /// state, otherwise stop (which also cancels an in-progress start/restart).
-    private func toggle() {
+    /// Spelled out, because the rendered title is a star glyph and fields
+    /// abbreviated to hold a fixed width.
+    private var accessibilityLabel: String {
+        let status = "DS Menu Bar — \(server.status.menuText)"
+        guard server.showsPerformanceInMenuBar,
+              let speed = server.performance.spokenDescription
+        else { return status }
+        return "\(status), \(speed)"
+    }
+
+    private func refreshMenu() {
+        statusTextItem.title = "Status: \(server.status.menuText)"
+        serverActionItem.title = server.status.actionTitle
+        speedItem.state = server.showsPerformanceInMenuBar ? .on : .off
+    }
+
+    @objc private func toggleServer() {
         switch server.status {
         case .running, .starting, .restarting, .stopping:
             server.stop()
         case .stopped, .error:
-            // A MenuBarExtra does not necessarily activate its accessory app
-            // while tracking the menu. Activate during the user's Start action
-            // so a subsequent modal failure alert has an active owner.
             NSApp.activate()
             server.start()
         }
+    }
+
+    @objc private func openLog() {
+        ServerLogActions.openInConsole(logPath: server.logPath)
+    }
+
+    @objc private func toggleSpeedDisplay() {
+        server.setShowsPerformanceInMenuBar(!server.showsPerformanceInMenuBar)
+    }
+
+    @objc private func showSettings() {
+        openSettings()
+    }
+
+    @objc private func showAbout() {
+        openAbout()
+    }
+
+    @objc private func quit() {
+        server.stop()
+        NSApp.terminate(nil)
+    }
+}
+
+/// Uses fixed-pitch glyphs only for fields whose contents change. The native
+/// menu-bar font remains in use for the status glyph, spacing, and units.
+@MainActor
+enum StatusBarTitle {
+    private static let menuFont = NSFont.menuBarFont(ofSize: 0)
+    private static let fieldFont = NSFont.monospacedSystemFont(
+        ofSize: menuFont.pointSize,
+        weight: .regular
+    )
+
+    static func make(
+        glyph: String,
+        performance: ServerPerformance
+    ) -> NSAttributedString {
+        let title = NSMutableAttributedString()
+        title.append(segment("\(glyph) ", font: menuFont))
+        title.append(segment(performance.menuBarPhase, font: fieldFont))
+        title.append(segment(" ", font: menuFont))
+        title.append(segment(performance.menuBarRate, font: fieldFont))
+        title.append(segment(" t/s", font: menuFont))
+        return title
+    }
+
+    private static func segment(_ string: String, font: NSFont) -> NSAttributedString {
+        NSAttributedString(string: string, attributes: [.font: font])
     }
 }
 

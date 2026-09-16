@@ -101,10 +101,19 @@ final class ProcessManager {
         let resolvedModelPath = DS4ServerCommand.resolving(configuration.modelPath, relativeTo: serverDir)
         let resolvedMTPPath = DS4ServerCommand.resolving(configuration.mtpPath, relativeTo: serverDir)
         let resolvedVisionPath = DS4ServerCommand.resolving(configuration.visionPath, relativeTo: serverDir)
-        let modelProfile = GGUFModelInspector.profile(
-            for: configuration.modelPath,
-            relativeTo: serverDir
-        )
+
+        // Persisted or externally edited configuration must not bypass basic
+        // file checks at the process boundary.
+        guard FileManager.default.isExecutableRegularFile(atPath: resolvedServerPath) else {
+            return failLaunch("ds4-server not found or not executable at \(resolvedServerPath)")
+        }
+        let modelProfile: DS4ModelProfile
+        switch DS4SelectionValidation.modelValidation(for: resolvedModelPath) {
+        case .success(let profile):
+            modelProfile = profile
+        case .failure(let error):
+            return failLaunch(error.launchMessage(at: resolvedModelPath))
+        }
         let supportProfile = GGUFModelInspector.supportProfile(
             for: configuration.mtpPath,
             relativeTo: serverDir
@@ -125,12 +134,6 @@ final class ProcessManager {
         // Every path checked here is already absolute — DS4ServerCommand.resolving
         // anchored relative ones to serverDir, which is the working directory set
         // on the child below — so these checks see the same files the server will.
-        guard FileManager.default.isExecutableRegularFile(atPath: resolvedServerPath) else {
-            return failLaunch("ds4-server not found or not executable at \(resolvedServerPath)")
-        }
-        guard FileManager.default.isReadableRegularFile(atPath: resolvedModelPath) else {
-            return failLaunch("model not readable at \(resolvedModelPath)")
-        }
         let usesExternalSupport =
             (configuration.mtpMode == .external && modelProfile.supportsExternalMTP) ||
             (configuration.mtpMode == .dspark && modelProfile.supportsDSpark)
@@ -204,6 +207,15 @@ final class ProcessManager {
         // Ensure the parent directory exists with owner-only permissions.
         let logDir = (logPathResolved as NSString).deletingLastPathComponent
         Self.createOwnerOnlyDirectory(logDir, fm: fm)
+        // KV cache files hold prompt text and model state, and the default
+        // location is inside world-writable /tmp. Create the directory here so
+        // it is owner-only rather than whatever umask ds4-server runs with.
+        if configuration.kvDiskEnabled {
+            Self.createOwnerOnlyDirectory(
+                DS4ServerCommand.expandingTilde(configuration.kvDiskDir),
+                fm: fm
+            )
+        }
         // Rotate an oversized log left by an older run before opening the live
         // append descriptor. Runtime monitoring below handles later growth.
         let maxLogBytes = configuration.logMaxSizeMB * 1024 * 1024
@@ -731,29 +743,72 @@ final class ProcessManager {
         try fm.removeItem(atPath: path)
     }
 
-    /// The last meaningful line of the log — usually the fatal message. The full
-    /// context remains in the log file at `logPath`.
+    /// The server diagnostic for the most recent failed launch. Argument-parser
+    /// failures print the actual error first and then a complete help screen, so
+    /// taking the final log line would report an example command instead.
+    func launchFailureReason(logPath: String) -> String {
+        let lines = recentLogLines(logPath: logPath)
+        guard !lines.isEmpty else { return "" }
+
+        let launchStart = lines.lastIndex(where: {
+            $0.hasPrefix("=== dsmenubar launch ")
+        })
+        let currentLaunch = launchStart.map { lines.dropFirst($0 + 1) } ?? lines[...]
+        let output = currentLaunch.filter { !Self.isLaunchMetadata($0) }
+        guard !output.isEmpty else { return "" }
+
+        let usageIndex = output.firstIndex(where: { $0.hasPrefix("Usage:") })
+        let beforeUsage = usageIndex.map { output[..<$0] } ?? output[...]
+        let diagnosticTerms = [
+            "error", "fatal", "fail", "unknown", "invalid", "unsupported",
+            "not found", "no such file", "unable", "cannot", "missing",
+        ]
+        if let diagnostic = beforeUsage.last(where: { line in
+            let lowercased = line.lowercased()
+            return diagnosticTerms.contains(where: lowercased.contains)
+        }) {
+            return diagnostic
+        }
+
+        // Help-producing parse failures conventionally print their diagnostic
+        // before the program name and description. Without a help block, the
+        // last line remains the best indication of a later startup failure.
+        if usageIndex != nil {
+            return beforeUsage.first ?? ""
+        }
+        return beforeUsage.last ?? output.last ?? ""
+    }
+
+    /// The last meaningful line of the log — usually the fatal message for a
+    /// process that had already reached its running state.
     func lastLogReason(logPath: String) -> String {
+        recentLogLines(logPath: logPath)
+            .filter { !Self.isLaunchMetadata($0) }
+            .last ?? ""
+    }
+
+    private func recentLogLines(logPath: String) -> [String] {
         let path = (logPath as NSString).expandingTildeInPath
         // Read only the tail: the log can grow large and we only need the last
         // meaningful line. A first line sliced by the byte window is harmless —
         // lossy UTF-8 decoding tolerates it and it gets filtered out anyway.
-        guard let handle = FileHandle(forReadingAtPath: path) else { return "" }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return [] }
         defer { try? handle.close() }
         let tailBytes: UInt64 = 64 * 1024
         let end = (try? handle.seekToEnd()) ?? 0
         try? handle.seek(toOffset: end > tailBytes ? end - tailBytes : 0)
-        guard let data = try? handle.readToEnd() else { return "" }
+        guard let data = try? handle.readToEnd() else { return [] }
         let content = String(decoding: data, as: UTF8.self)
-        let lines = content
+        return content
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { line in
-                !line.isEmpty &&
-                !line.hasPrefix("===") && !line.hasPrefix("exec:") &&
-                !line.hasPrefix("cwd:") && !line.hasPrefix("argv:") && line != "---"
-            }
-        return lines.last ?? ""
+            .filter { !$0.isEmpty }
+    }
+
+    private static func isLaunchMetadata(_ line: String) -> Bool {
+        line.hasPrefix("===") || line.hasPrefix("exec:") ||
+            line.hasPrefix("cwd:") || line.hasPrefix("env:") ||
+            line.hasPrefix("argv:") || line == "---"
     }
 
     // MARK: - Cleanup

@@ -5,103 +5,25 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum InitialSetupValidation {
-    static func serverError(for path: String) -> String? {
-        let candidate = expanded(path)
-        guard FileManager.default.isExecutableRegularFile(atPath: candidate) else {
-            return "Choose an executable ds4-server file."
-        }
-        guard executableIdentifiesAsDS4Server(at: candidate) else {
-            return "Choose ds4-server, not another executable."
-        }
-        return nil
-    }
-
-    static func modelError(for path: String) -> String? {
-        let candidate = expanded(path)
-        guard FileManager.default.isReadableRegularFile(atPath: candidate) else {
-            return "Choose a readable GGUF model file."
-        }
-        do {
-            let profile = try GGUFModelInspector.profile(at: candidate)
-            guard !profile.isSupportArtifact else {
-                return "Choose a main model GGUF, not a support GGUF."
-            }
-        } catch {
-            return "Choose a valid GGUF model file."
-        }
-        return nil
-    }
-
-    static func preferredModelDirectory(forServerPath path: String) -> URL {
-        let serverDirectory = URL(fileURLWithPath: expanded(path))
-            .deletingLastPathComponent()
-        let ggufDirectory = serverDirectory.appendingPathComponent("gguf", isDirectory: true)
-        var isDirectory: ObjCBool = false
-        if FileManager.default.fileExists(
-            atPath: ggufDirectory.path,
-            isDirectory: &isDirectory
-        ), isDirectory.boolValue {
-            return ggufDirectory
-        }
-        return serverDirectory
-    }
-
-    private static func executableIdentifiesAsDS4Server(at path: String) -> Bool {
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("dsmenubar-help-\(UUID().uuidString)")
-        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil),
-              let output = try? FileHandle(forWritingTo: outputURL)
-        else { return false }
-        defer {
-            try? output.close()
-            try? FileManager.default.removeItem(at: outputURL)
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["--help"]
-        process.standardOutput = output
-        process.standardError = output
-
-        let finished = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in finished.signal() }
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-
-        guard finished.wait(timeout: .now() + 2) == .success else {
-            process.terminate()
-            return false
-        }
-        guard process.terminationStatus == 0 else { return false }
-
-        try? output.synchronize()
-        guard let reader = try? FileHandle(forReadingFrom: outputURL) else { return false }
-        defer { try? reader.close() }
-        let data = (try? reader.read(upToCount: 64 * 1_024)) ?? Data()
-        let help = String(decoding: data, as: UTF8.self)
-        return help.contains("Usage: ds4-server")
-    }
-
-    private static func expanded(_ path: String) -> String {
-        (path as NSString).expandingTildeInPath
-    }
-}
-
 struct InitialSetupView: View {
-    let onContinue: (_ serverPath: String, _ modelPath: String) -> Void
+    let onContinue: (
+        _ serverPath: String,
+        _ modelPath: String,
+        _ modelProfile: DS4ModelProfile
+    ) -> Void
 
     @State private var serverPath = ""
     @State private var modelPath = ""
     @State private var serverError: String?
     @State private var modelError: String?
+    @State private var modelProfile: DS4ModelProfile?
+    @State private var isCheckingServer = false
+    @State private var isCheckingModel = false
 
     private var canContinue: Bool {
         return !serverPath.isEmpty && serverError == nil &&
-            !modelPath.isEmpty && modelError == nil
+            !modelPath.isEmpty && modelError == nil && modelProfile != nil &&
+            !isCheckingServer && !isCheckingModel
     }
 
     var body: some View {
@@ -120,16 +42,23 @@ struct InitialSetupView: View {
             VStack(spacing: 0) {
                 selectionRow(
                     title: "ds4-server",
-                    path: serverPath,
+                    path: DS4ServerCommand.presentingPath(serverPath),
                     error: serverError,
+                    isChecking: isCheckingServer,
+                    checkingText: "Checking ds4-server…",
                     action: chooseServer
                 )
                 Divider()
                     .padding(.leading, 16)
                 selectionRow(
                     title: "Main GGUF model",
-                    path: modelPath,
+                    path: DS4ServerCommand.presentingResourcePath(
+                        modelPath,
+                        relativeTo: DS4ServerCommand.serverDirectory(for: serverPath)
+                    ),
                     error: modelError,
+                    isChecking: isCheckingModel,
+                    checkingText: "Checking GGUF model…",
                     action: chooseModel
                 )
             }
@@ -167,6 +96,8 @@ struct InitialSetupView: View {
         title: String,
         path: String,
         error: String?,
+        isChecking: Bool = false,
+        checkingText: String = "Checking…",
         action: @escaping () -> Void
     ) -> some View {
         HStack(spacing: 12) {
@@ -175,8 +106,13 @@ struct InitialSetupView: View {
                     Text(title)
                         .fontWeight(.medium)
                     if !path.isEmpty && error == nil {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
+                        if isChecking {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        }
                     }
                 }
                 Text(path.isEmpty ? "Required" : path)
@@ -189,6 +125,10 @@ struct InitialSetupView: View {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
                         .foregroundStyle(.red)
+                } else if isChecking {
+                    Text(checkingText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             Spacer(minLength: 12)
@@ -210,8 +150,18 @@ struct InitialSetupView: View {
 
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        serverPath = abbreviated(url.path)
-        serverError = InitialSetupValidation.serverError(for: serverPath)
+        serverPath = DS4ServerCommand.storingAbsolutePath(url.path)
+        serverError = nil
+        isCheckingServer = true
+        let selectedPath = serverPath
+        Task {
+            let error = await Task.detached(priority: .userInitiated) {
+                DS4SelectionValidation.serverError(for: selectedPath)
+            }.value
+            guard serverPath == selectedPath else { return }
+            serverError = error
+            isCheckingServer = false
+        }
     }
 
     private func chooseModel() {
@@ -223,11 +173,11 @@ struct InitialSetupView: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.resolvesAliases = true
-        if let gguf = UTType(filenameExtension: "gguf") {
+        if let gguf = UTType(filenameExtension: "gguf", conformingTo: .data) {
             panel.allowedContentTypes = [gguf]
         }
         if !serverPath.isEmpty, serverError == nil {
-            panel.directoryURL = InitialSetupValidation.preferredModelDirectory(
+            panel.directoryURL = DS4SelectionValidation.preferredModelDirectory(
                 forServerPath: serverPath
             )
         } else {
@@ -236,15 +186,34 @@ struct InitialSetupView: View {
 
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        modelPath = abbreviated(url.path)
-        modelError = InitialSetupValidation.modelError(for: modelPath)
+        modelPath = DS4ServerCommand.storingResourcePath(
+            url.path,
+            relativeTo: DS4ServerCommand.serverDirectory(for: serverPath)
+        )
+        modelError = nil
+        modelProfile = nil
+        isCheckingModel = true
+        let selectedPath = modelPath
+        Task {
+            let validation = await Task.detached(priority: .userInitiated) {
+                DS4SelectionValidation.modelValidation(for: selectedPath)
+            }.value
+            guard modelPath == selectedPath else { return }
+            switch validation {
+            case .success(let profile):
+                modelProfile = profile
+                modelError = nil
+            case .failure(let error):
+                modelProfile = nil
+                modelError = error.message
+            }
+            isCheckingModel = false
+        }
     }
 
     private func continueSetup() {
-        serverError = InitialSetupValidation.serverError(for: serverPath)
-        modelError = InitialSetupValidation.modelError(for: modelPath)
-        guard canContinue else { return }
-        onContinue(serverPath, modelPath)
+        guard canContinue, let modelProfile else { return }
+        onContinue(serverPath, modelPath, modelProfile)
     }
 
     private func startingDirectory(for path: String) -> URL {
@@ -258,9 +227,6 @@ struct InitialSetupView: View {
         (path as NSString).expandingTildeInPath
     }
 
-    private func abbreviated(_ path: String) -> String {
-        (path as NSString).abbreviatingWithTildeInPath
-    }
 }
 
 @MainActor
@@ -268,7 +234,8 @@ final class InitialSetupWindowController: NSWindowController {
     init(
         onContinue: @escaping (
             _ serverPath: String,
-            _ modelPath: String
+            _ modelPath: String,
+            _ modelProfile: DS4ModelProfile
         ) -> Void
     ) {
         let view = InitialSetupView(onContinue: onContinue)

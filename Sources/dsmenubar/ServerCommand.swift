@@ -218,6 +218,109 @@ enum DS4ServerCommand {
         (path as NSString).expandingTildeInPath
     }
 
+    /// Normalize redundant separators and dot components without turning a
+    /// relative path into an absolute one. Storage and presentation policies
+    /// are applied separately by the helpers below.
+    static func normalizingPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return trimmed }
+        if trimmed.hasPrefix("/") {
+            return (trimmed as NSString).standardizingPath
+        }
+        if trimmed == "~" || trimmed.hasPrefix("~/") {
+            let standardized = (trimmed as NSString).standardizingPath
+            return (standardized as NSString).abbreviatingWithTildeInPath
+        }
+
+        var components: [Substring] = []
+        for component in trimmed.split(separator: "/", omittingEmptySubsequences: true) {
+            switch component {
+            case ".":
+                continue
+            case ".." where components.last.map({ $0 != ".." }) == true:
+                components.removeLast()
+            default:
+                components.append(component)
+            }
+        }
+        return components.isEmpty ? "." : components.joined(separator: "/")
+    }
+
+    /// Store an executable path independently of the app's current directory.
+    static func storingAbsolutePath(_ path: String) -> String {
+        let normalized = normalizingPath(path)
+        guard !normalized.isEmpty else { return normalized }
+        let expanded = expandingTilde(normalized)
+        if expanded.hasPrefix("/") {
+            return normalizingPath(expanded)
+        }
+        return normalizingPath(
+            (FileManager.default.currentDirectoryPath as NSString)
+                .appendingPathComponent(expanded)
+        )
+    }
+
+    /// Store a GGUF independently of later changes to ds4-server's directory.
+    static func storingResourcePath(
+        _ path: String,
+        relativeTo directory: String
+    ) -> String {
+        let normalized = normalizingPath(path)
+        guard !normalized.isEmpty else { return normalized }
+        return normalizingPath(resolving(normalized, relativeTo: directory))
+    }
+
+    /// Recombine a chosen folder with a file name. The folder comes from a
+    /// panel and the name from a text field, because a file the app has yet to
+    /// create cannot be selected.
+    static func storingFilePath(directory: String, name: String) -> String {
+        let folder = normalizingPath(directory)
+        let file = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !file.isEmpty else { return folder }
+        guard !folder.isEmpty else { return normalizingPath(file) }
+        return normalizingPath((folder as NSString).appendingPathComponent(file))
+    }
+
+    /// The folder a stored file path lives in, for the row that picks it.
+    static func fileDirectory(of path: String) -> String {
+        (normalizingPath(path) as NSString).deletingLastPathComponent
+    }
+
+    /// The name a stored file path ends with, for the row that edits it.
+    static func fileName(of path: String) -> String {
+        (normalizingPath(path) as NSString).lastPathComponent
+    }
+
+    /// Present a stored path compactly without changing its identity.
+    static func presentingPath(_ path: String) -> String {
+        let normalized = normalizingPath(path)
+        guard normalized.hasPrefix("/") else { return normalized }
+        return (normalized as NSString).abbreviatingWithTildeInPath
+    }
+
+    /// Present a GGUF relative to ds4-server when it is inside the server's
+    /// working directory. Resources elsewhere use an absolute or `~/` form.
+    static func presentingResourcePath(
+        _ path: String,
+        relativeTo directory: String
+    ) -> String {
+        let normalized = normalizingPath(path)
+        guard !normalized.isEmpty,
+              normalized.hasPrefix("/") || normalized == "~" || normalized.hasPrefix("~/"),
+              !directory.isEmpty
+        else { return normalized }
+
+        let absolute = (expandingTilde(normalized) as NSString).standardizingPath
+        let base = (expandingTilde(directory) as NSString).standardizingPath
+        let absoluteComponents = (absolute as NSString).pathComponents
+        let baseComponents = (base as NSString).pathComponents
+        guard absoluteComponents.count > baseComponents.count,
+              Array(absoluteComponents.prefix(baseComponents.count)) == baseComponents
+        else { return presentingPath(normalized) }
+
+        return absoluteComponents.dropFirst(baseComponents.count).joined(separator: "/")
+    }
+
     /// The working directory a launched ds4-server inherits: the folder holding
     /// the executable.
     static func serverDirectory(for serverPath: String) -> String {

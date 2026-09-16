@@ -33,11 +33,17 @@ final class ServerConfigurationTests: XCTestCase {
         )
 
         XCTAssertFalse(configuration.needsInitialSetup)
-        XCTAssertEqual(configuration.snapshot().serverPath, "~/custom/ds4-server")
-        XCTAssertEqual(configuration.snapshot().modelPath, "~/models/custom.gguf")
+        XCTAssertEqual(
+            configuration.snapshot().serverPath,
+            DS4ServerCommand.expandingTilde("~/custom/ds4-server")
+        )
+        XCTAssertEqual(
+            configuration.snapshot().modelPath,
+            DS4ServerCommand.expandingTilde("~/models/custom.gguf")
+        )
         XCTAssertEqual(
             ServerConfiguration(defaults: defaults).snapshot().serverPath,
-            "~/custom/ds4-server"
+            DS4ServerCommand.expandingTilde("~/custom/ds4-server")
         )
     }
 
@@ -241,13 +247,9 @@ final class ServerConfigurationTests: XCTestCase {
         let modelDirectory = directory.appendingPathComponent("models")
         try FileManager.default.createDirectory(at: modelDirectory, withIntermediateDirectories: true)
 
-        var config = ServerConfiguration.Config()
-        config.serverPath = directory.appendingPathComponent("ds4-server").path
-        config.modelPath = modelDirectory.lastPathComponent
-
         XCTAssertEqual(
-            config.validationErrors()[.modelPath],
-            "Choose a model file, not a directory"
+            DS4SelectionValidation.modelError(for: modelDirectory.path),
+            "Choose a model file, not a directory."
         )
     }
 
@@ -264,6 +266,21 @@ final class ServerConfigurationTests: XCTestCase {
             modelProfile: .unknown
         )
         XCTAssertFalse(args.contains("--mtp-model"))
+    }
+
+    func testNormalizationStoresSelectionPathsAbsolute() {
+        var config = ServerConfiguration.Config()
+        config.serverPath = "/opt/ds4/ds4-server"
+        config.modelPath = "gguf/main.gguf"
+        config.mtpPath = "gguf/support.gguf"
+        config.visionPath = "gguf/vision.gguf"
+
+        let normalized = config.normalized()
+
+        XCTAssertEqual(normalized.serverPath, "/opt/ds4/ds4-server")
+        XCTAssertEqual(normalized.modelPath, "/opt/ds4/gguf/main.gguf")
+        XCTAssertEqual(normalized.mtpPath, "/opt/ds4/gguf/support.gguf")
+        XCTAssertEqual(normalized.visionPath, "/opt/ds4/gguf/vision.gguf")
     }
 
     // MARK: - Tuning defaults

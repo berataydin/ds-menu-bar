@@ -7,6 +7,36 @@ import XCTest
 @testable import dsmenubar
 
 final class ProcessManagerTests: XCTestCase {
+    func testLaunchFailureReasonIgnoresHelpTextAfterParserError() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-launch-error-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let logURL = directory.appendingPathComponent("server.log")
+        let log = """
+        === dsmenubar launch 2026-09-15 19:40:57 ===
+        exec: /tmp/ds4-server
+        cwd:  /tmp
+        argv: --ple bogus.gguf
+        ---
+        0915 19:40:57 ds4-server: unknown option: --ple
+        ds4-server
+        Serve one loaded DwarfStar model through an HTTP API.
+
+        Usage: ds4-server [options]
+        Examples
+          curl http://127.0.0.1:8000/v1/models
+        """
+        try Data(log.utf8).write(to: logURL)
+
+        XCTAssertEqual(
+            ProcessManager().launchFailureReason(logPath: logURL.path),
+            "0915 19:40:57 ds4-server: unknown option: --ple"
+        )
+    }
+
     @MainActor
     func testRunningProcessRotatesLogAtConfiguredSize() async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -184,6 +214,123 @@ final class ProcessManagerTests: XCTestCase {
         )
     }
 
+    func testLaunchDoesNotRunServerHelpDuringPreflight() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-no-help-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let markerURL = directory.appendingPathComponent("help-was-run")
+        let serverURL = directory.appendingPathComponent("ds4-server")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "--help" ]; then
+            /usr/bin/touch '\(markerURL.path)'
+        fi
+        exit 0
+        """
+        try Data(script.utf8).write(to: serverURL)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: serverURL.path
+        )
+
+        let modelURL = directory.appendingPathComponent("model.gguf")
+        try makeGGUF(architecture: "glm5-next").write(to: modelURL)
+
+        var configuration = ServerConfiguration.Config()
+        configuration.serverPath = serverURL.path
+        configuration.modelPath = modelURL.path
+        configuration.host = "["
+
+        let manager = ProcessManager()
+        var failure: String?
+        manager.onLaunchFailure = { failure = $0 }
+
+        XCTAssertNil(manager.launch(configuration: configuration))
+        XCTAssertEqual(
+            failure,
+            "Unable to construct a health-check URL for host ["
+        )
+        XCTAssertFalse(fileManager.fileExists(atPath: markerURL.path))
+    }
+
+    func testLaunchRejectsReadableNonGGUFModel() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-invalid-model-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let serverURL = directory.appendingPathComponent("ds4-server")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: serverURL)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: serverURL.path
+        )
+        let modelURL = directory.appendingPathComponent("model.gguf")
+        try Data("not a GGUF".utf8).write(to: modelURL)
+
+        var configuration = ServerConfiguration.Config()
+        configuration.serverPath = serverURL.path
+        configuration.modelPath = modelURL.path
+
+        let manager = ProcessManager()
+        var failure: String?
+        manager.onLaunchFailure = { failure = $0 }
+
+        XCTAssertNil(manager.launch(configuration: configuration))
+        XCTAssertEqual(
+            failure,
+            "model is not a valid GGUF at \(modelURL.path)"
+        )
+    }
+
+    /// Cache files hold prompt text and model state, and the default location
+    /// is inside world-writable /tmp.
+    func testLaunchCreatesOwnerOnlyKVCacheDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-kv-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let serverURL = directory.appendingPathComponent("ds4-server")
+        try Data("#!/bin/sh\nsleep 5\n".utf8).write(to: serverURL)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: serverURL.path)
+
+        let modelURL = directory.appendingPathComponent("model.gguf")
+        try makeGGUF(architecture: "glm5-next").write(to: modelURL)
+        let cacheURL = directory.appendingPathComponent("kv-cache")
+
+        var configuration = ServerConfiguration.Config()
+        configuration.serverPath = serverURL.path
+        configuration.modelPath = modelURL.path
+        configuration.logPath = directory.appendingPathComponent("server.log").path
+        configuration.kvDiskEnabled = true
+        configuration.kvDiskDir = cacheURL.path
+
+        let manager = ProcessManager()
+        defer {
+            if manager.isProcessRunning {
+                manager.terminate()
+            }
+        }
+
+        XCTAssertNotNil(manager.launch(configuration: configuration))
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(
+            fileManager.fileExists(atPath: cacheURL.path, isDirectory: &isDirectory)
+        )
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertEqual(
+            (try fileManager.attributesOfItem(atPath: cacheURL.path)[.posixPermissions]
+                as? NSNumber)?.int16Value,
+            0o700
+        )
+    }
+
     func testLaunchResolvesRelativeModelAndSkipsDisabledVisionPreflight() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("dsmenubar-process-\(UUID().uuidString)")
@@ -251,9 +398,42 @@ final class ProcessManagerTests: XCTestCase {
         }
     }
 
-    private func makeGGUF(architecture: String) -> Data {
+    func testFutureGGUFVersionReachesServerLaunch() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dsmenubar-process-future-\(UUID().uuidString)")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let serverURL = directory.appendingPathComponent("ds4-server")
+        try Data("#!/bin/sh\nsleep 5\n".utf8).write(to: serverURL)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: serverURL.path
+        )
+
+        let modelURL = directory.appendingPathComponent("future.gguf")
+        try makeGGUF(architecture: "future-model", version: 4).write(to: modelURL)
+
+        var configuration = ServerConfiguration.Config()
+        configuration.serverPath = serverURL.path
+        configuration.modelPath = modelURL.path
+        configuration.host = "["
+
+        let manager = ProcessManager()
+        var failure: String?
+        manager.onLaunchFailure = { failure = $0 }
+
+        XCTAssertNil(manager.launch(configuration: configuration))
+        XCTAssertEqual(
+            failure,
+            "Unable to construct a health-check URL for host ["
+        )
+    }
+
+    private func makeGGUF(architecture: String, version: UInt32 = 3) -> Data {
         var data = Data([0x47, 0x47, 0x55, 0x46])
-        append(UInt32(3), to: &data)
+        append(version, to: &data)
         append(UInt64(0), to: &data)
         append(UInt64(1), to: &data)
         append(utf8: "general.architecture", to: &data)

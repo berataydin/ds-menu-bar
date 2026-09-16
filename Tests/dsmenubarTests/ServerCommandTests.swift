@@ -716,6 +716,146 @@ final class ServerCommandTests: XCTestCase {
         XCTAssertEqual(DS4ServerCommand.resolving("", relativeTo: "/opt/ds4"), "")
     }
 
+    func testPathNormalizationPreservesConfiguredPathStyle() {
+        XCTAssertEqual(
+            DS4ServerCommand.normalizingPath("/Volumes///aa/ds4/./ds4-server"),
+            "/Volumes/aa/ds4/ds4-server"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.normalizingPath("gguf///models/../model.gguf"),
+            "gguf/model.gguf"
+        )
+        XCTAssertEqual(DS4ServerCommand.normalizingPath("a/../../b"), "../b")
+        XCTAssertEqual(
+            DS4ServerCommand.normalizingPath("~/models///model.gguf"),
+            "~/models/model.gguf"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.normalizingPath("  ~/models/model.gguf  "),
+            "~/models/model.gguf"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.normalizingPath("  /Volumes/aa/model.gguf  "),
+            "/Volumes/aa/model.gguf"
+        )
+        XCTAssertEqual(DS4ServerCommand.normalizingPath(""), "")
+    }
+
+    func testStoredGGUFPathsArePresentedRelativeToServerDirectory() {
+        XCTAssertEqual(
+            DS4ServerCommand.presentingResourcePath(
+                "/Volumes///aa/ds4/gguf/model.gguf",
+                relativeTo: "/Volumes/aa/ds4"
+            ),
+            "gguf/model.gguf"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.presentingResourcePath(
+                "/Volumes/aa/ds4-models/model.gguf",
+                relativeTo: "/Volumes/aa/ds4"
+            ),
+            "/Volumes/aa/ds4-models/model.gguf"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.presentingResourcePath(
+                "/Volumes/aa/ds4/gguf/model.gguf",
+                relativeTo: "/Volumes/aa/other-ds4"
+            ),
+            "/Volumes/aa/ds4/gguf/model.gguf"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.presentingResourcePath(
+                "gguf///model.gguf",
+                relativeTo: "/Volumes/aa/ds4"
+            ),
+            "gguf/model.gguf"
+        )
+        let homeModel = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("external/model.gguf").path
+        XCTAssertEqual(
+            DS4ServerCommand.presentingResourcePath(
+                homeModel,
+                relativeTo: "/Volumes/aa/ds4"
+            ),
+            "~/external/model.gguf"
+        )
+    }
+
+    func testGGUFPathsAreStoredAbsolute() {
+        XCTAssertEqual(
+            DS4ServerCommand.storingResourcePath(
+                "gguf///model.gguf",
+                relativeTo: "/Volumes/aa/ds4"
+            ),
+            "/Volumes/aa/ds4/gguf/model.gguf"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.storingResourcePath(
+                "/models///model.gguf",
+                relativeTo: "/Volumes/aa/ds4"
+            ),
+            "/models/model.gguf"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.storingResourcePath(
+                "  gguf/model.gguf  ",
+                relativeTo: "/Volumes/aa/ds4"
+            ),
+            "/Volumes/aa/ds4/gguf/model.gguf"
+        )
+    }
+
+    func testServerPathsAreStoredAbsoluteAndPresentedWithTilde() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        XCTAssertEqual(
+            DS4ServerCommand.storingAbsolutePath("~/ds4/ds4-server"),
+            "\(home)/ds4/ds4-server"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.storingAbsolutePath("  ~/ds4/ds4-server  "),
+            "\(home)/ds4/ds4-server"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.presentingPath("\(home)///ds4/ds4-server"),
+            "~/ds4/ds4-server"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.storingAbsolutePath("bin/ds4-server"),
+            (FileManager.default.currentDirectoryPath as NSString)
+                .appendingPathComponent("bin/ds4-server")
+        )
+    }
+
+    /// A log or trace path is a picked folder plus a typed name, and splitting
+    /// it has to return exactly what was combined.
+    func testCreatedFilePathsSplitIntoFolderAndName() {
+        XCTAssertEqual(
+            DS4ServerCommand.storingFilePath(
+                directory: "~/Library/Logs//dsmenubar/",
+                name: "  ds4.log  "
+            ),
+            "~/Library/Logs/dsmenubar/ds4.log"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.storingFilePath(directory: "/var/log/ds4", name: "ds4.log"),
+            "/var/log/ds4/ds4.log"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.fileDirectory(of: "~/Library/Logs/dsmenubar/ds4.log"),
+            "~/Library/Logs/dsmenubar"
+        )
+        XCTAssertEqual(
+            DS4ServerCommand.fileName(of: "~/Library/Logs/dsmenubar/ds4.log"),
+            "ds4.log"
+        )
+
+        // An empty name would turn the file path into its own directory.
+        XCTAssertEqual(
+            DS4ServerCommand.storingFilePath(directory: "/var/log/ds4", name: "   "),
+            "/var/log/ds4"
+        )
+    }
+
     /// The preview is the app's promise about what it will run, so it has to
     /// resolve relative paths exactly as `ProcessManager.launch` does.
     func testPreviewResolvesRelativePathsLikeTheLaunchPath() {

@@ -111,11 +111,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     @MainActor
     private func presentInitialSetup() {
-        let controller = InitialSetupWindowController { [weak self] serverPath, modelPath in
+        let controller = InitialSetupWindowController {
+            [weak self] serverPath, modelPath, modelProfile in
             guard let self else { return }
             self.server.completeInitialSetup(
                 serverPath: serverPath,
-                modelPath: modelPath
+                modelPath: modelPath,
+                modelProfile: modelProfile
             )
             self.initialSetupCompleted = true
             self.initialSetupWindowController?.close()

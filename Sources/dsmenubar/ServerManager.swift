@@ -105,7 +105,9 @@ final class ServerManager: ObservableObject {
                 self.activeLaunchAttemptID = nil
                 self.status = .stopped
             } else if wasStarting, self.activeLaunchSource != nil {
-                let detail = info.failureReason ?? self.lastLogReason()
+                let detail = info.failureReason ?? self.processManager.launchFailureReason(
+                    logPath: self.config.logPath
+                )
                 let reason = detail.isEmpty ? "ds4-server exited during startup" : detail
                 self.status = .error(reason)
                 self.reportLaunchFailure(reason)
@@ -192,10 +194,15 @@ final class ServerManager: ObservableObject {
         config.needsInitialSetup
     }
 
-    func completeInitialSetup(serverPath: String, modelPath: String) {
+    func completeInitialSetup(
+        serverPath: String,
+        modelPath: String,
+        modelProfile: DS4ModelProfile
+    ) {
         config.completeInitialSetup(
             serverPath: serverPath,
-            modelPath: modelPath
+            modelPath: modelPath,
+            modelProfile: modelProfile
         )
     }
 

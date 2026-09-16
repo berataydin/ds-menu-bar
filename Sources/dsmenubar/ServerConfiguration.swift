@@ -154,12 +154,16 @@ final class ServerConfiguration {
         }
     }
 
-    func completeInitialSetup(serverPath: String, modelPath: String) {
+    func completeInitialSetup(
+        serverPath: String,
+        modelPath: String,
+        modelProfile: DS4ModelProfile? = nil
+    ) {
         var configured = values
         configured.serverPath = serverPath
         configured.modelPath = modelPath
-        let serverDirectory = DS4ServerCommand.serverDirectory(for: serverPath)
-        let profile = GGUFModelInspector.profile(for: modelPath, relativeTo: serverDirectory)
+        configured = configured.normalized()
+        let profile = modelProfile ?? GGUFModelInspector.profile(for: configured.modelPath)
         configured = configured.restoringTuningDefaults(for: profile)
         configured = configured.storingCurrentModelProfile()
         values = configured
@@ -578,15 +582,6 @@ extension ServerConfiguration.Config {
 
         nonEmpty(serverPath, field: .serverPath, message: "Choose a ds4-server executable")
         nonEmpty(modelPath, field: .modelPath, message: "Choose a model file")
-        if !modelPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let serverDirectory = DS4ServerCommand.serverDirectory(for: serverPath)
-            let resolvedModelPath = DS4ServerCommand.resolving(modelPath, relativeTo: serverDirectory)
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: resolvedModelPath, isDirectory: &isDirectory),
-               isDirectory.boolValue {
-                errors[.modelPath] = "Choose a model file, not a directory"
-            }
-        }
         if modelProfile.isSupportArtifact {
             errors[.modelPath] = "This is a \(modelProfile.displayName), not a main model. Choose a main model GGUF instead."
         }
@@ -790,13 +785,30 @@ extension ServerConfiguration.Config {
         ).contains(value)
     }
 
-    /// Keep persisted values inside engine ranges when loading an older or
-    /// manually edited preference blob. Normal validation still reports other
-    /// invalid values so the UI can explain them instead of hiding them.
+    /// Give persisted file selections stable absolute identities and keep
+    /// values inside engine ranges when loading an older or manually edited
+    /// preference blob. Normal validation still reports other invalid values
+    /// so the UI can explain them instead of hiding them.
     func normalized() -> Self {
         var config = self
         config.mtpDraft = min(DS4ConfigurationLimits.maxMTPDraft,
                               max(DS4ConfigurationLimits.minMTPDraft, config.mtpDraft))
+        if !config.serverPath.isEmpty {
+            config.serverPath = DS4ServerCommand.storingAbsolutePath(config.serverPath)
+            let directory = DS4ServerCommand.serverDirectory(for: config.serverPath)
+            config.modelPath = DS4ServerCommand.storingResourcePath(
+                config.modelPath,
+                relativeTo: directory
+            )
+            config.mtpPath = DS4ServerCommand.storingResourcePath(
+                config.mtpPath,
+                relativeTo: directory
+            )
+            config.visionPath = DS4ServerCommand.storingResourcePath(
+                config.visionPath,
+                relativeTo: directory
+            )
+        }
         return config
     }
 

@@ -513,6 +513,12 @@ struct DS4VisionProfile: Equatable {
 /// seeks past tensor data and tokenizer arrays, so selecting a 100 GB model
 /// never loads the model into memory.
 enum GGUFModelInspector {
+    static func hasGGUFMagic(at path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: 4)) == Data([0x47, 0x47, 0x55, 0x46])
+    }
+
     static func profile(for path: String) -> DS4ModelProfile {
         return profile(for: path, relativeTo: nil)
     }

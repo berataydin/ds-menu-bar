@@ -695,12 +695,12 @@ final class ModelSupportTests: XCTestCase {
         try Data(
             "#!/bin/sh\nprintf 'Usage: ds4-server with future syntax\\n'\n".utf8
         ).write(to: server)
-        XCTAssertNotNil(InitialSetupValidation.serverError(for: server.path))
+        XCTAssertNotNil(DS4SelectionValidation.serverError(for: server.path))
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: server.path
         )
-        XCTAssertNil(InitialSetupValidation.serverError(for: server.path))
+        XCTAssertNil(DS4SelectionValidation.serverError(for: server.path))
 
         let otherExecutable = directory.appendingPathComponent("ds4-bench")
         try Data(
@@ -711,7 +711,7 @@ final class ModelSupportTests: XCTestCase {
             ofItemAtPath: otherExecutable.path
         )
         XCTAssertEqual(
-            InitialSetupValidation.serverError(for: otherExecutable.path),
+            DS4SelectionValidation.serverError(for: otherExecutable.path),
             "Choose ds4-server, not another executable."
         )
 
@@ -721,13 +721,13 @@ final class ModelSupportTests: XCTestCase {
             withIntermediateDirectories: false
         )
         XCTAssertEqual(
-            InitialSetupValidation.preferredModelDirectory(forServerPath: server.path),
+            DS4SelectionValidation.preferredModelDirectory(forServerPath: server.path),
             ggufDirectory
         )
 
         let mainModel = directory.appendingPathComponent("future.gguf")
         try makeGGUF(architecture: "future-model").write(to: mainModel)
-        XCTAssertNil(InitialSetupValidation.modelError(for: mainModel.path))
+        XCTAssertNil(DS4SelectionValidation.modelError(for: mainModel.path))
 
         let oldQwenModel = directory.appendingPathComponent("old-qwen.gguf")
         try makeGGUF(
@@ -737,7 +737,7 @@ final class ModelSupportTests: XCTestCase {
                 "qwen4exp.embedding_length_per_layer_input": 256,
             ]
         ).write(to: oldQwenModel)
-        XCTAssertNil(InitialSetupValidation.modelError(for: oldQwenModel.path))
+        XCTAssertNil(DS4SelectionValidation.modelError(for: oldQwenModel.path))
 
         let currentQwenModel = directory.appendingPathComponent("current-qwen.gguf")
         try makeGGUF(
@@ -749,19 +749,19 @@ final class ModelSupportTests: XCTestCase {
             tensorDimensions: ["per_layer_token_embd.weight": [256, 10_000]],
             tensorTypes: ["per_layer_token_embd.weight": 30]
         ).write(to: currentQwenModel)
-        XCTAssertNil(InitialSetupValidation.modelError(for: currentQwenModel.path))
+        XCTAssertNil(DS4SelectionValidation.modelError(for: currentQwenModel.path))
 
         let supportModel = directory.appendingPathComponent("support.gguf")
         try makeGGUF(architecture: "deepseek4_mtp_support").write(to: supportModel)
         XCTAssertEqual(
-            InitialSetupValidation.modelError(for: supportModel.path),
+            DS4SelectionValidation.modelError(for: supportModel.path),
             "Choose a main model GGUF, not a support GGUF."
         )
 
         let invalidModel = directory.appendingPathComponent("invalid.gguf")
         try Data("not a GGUF".utf8).write(to: invalidModel)
         XCTAssertEqual(
-            InitialSetupValidation.modelError(for: invalidModel.path),
+            DS4SelectionValidation.modelError(for: invalidModel.path),
             "Choose a valid GGUF model file."
         )
     }

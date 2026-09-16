@@ -6,8 +6,8 @@
 
 DS Menu Bar is a native macOS menu bar app for starting, stopping, and
 configuring one local [`ds4-server`](https://github.com/antirez/ds4) process.
-It keeps DwarfStar server status and common controls available without keeping
-a terminal window open.
+It keeps [DwarfStar](https://github.com/antirez/ds4) server status and common
+controls available without keeping a terminal window open.
 
 DS Menu Bar manages one Metal server on the Mac where the app is running. It
 does not manage remote, distributed, Linux, CUDA, or ROCm servers.
@@ -77,12 +77,12 @@ After setup, use the star icon in the menu bar to start or stop the server,
 open its log, or open Settings. Applying settings while the server is running
 restarts it with the updated configuration.
 
-The General tab in Settings shows the generated command before it is run.
-Available controls and defaults adapt to the selected model and the Mac's
-unified memory.
+The General tab in Settings shows the generated command before it is run. The
+Model tab shows selected files and detected model details. Available controls
+and defaults adapt to the selected model and the Mac's unified memory.
 
 <p align="center">
-  <img src="docs/images/general-settings.png" width="939" alt="General settings and generated command for a running server">
+  <img src="docs/images/model-settings.png" width="936" alt="Model settings showing detected Qwen3.8 Flash Next details">
 </p>
 
 ## Logs and request traces

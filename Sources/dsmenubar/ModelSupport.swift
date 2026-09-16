@@ -99,6 +99,9 @@ struct DS4ModelProfile: Equatable {
     }
     var supportsExternalMTP: Bool { family == .deepSeek }
     var supportsDSpark: Bool { family == .deepSeek }
+    var supportsBatchedEmbeddedMTP: Bool {
+        family == .qwen38 && supportsEmbeddedMTP
+    }
     var supportsVision: Bool { family == .glm53Flash || family == .deepSeek41 || family == .qwen38 }
     var supportsSSDStreaming: Bool { family != .qwen38 }
     var supportsManualPrefill: Bool { family == .deepSeek || family == .qwen38 || family == .unknown }

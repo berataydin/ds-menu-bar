@@ -551,6 +551,92 @@ final class ServerCommandTests: XCTestCase {
         ).contains("--mtp"))
     }
 
+    func testQwenEmbeddedMTPCanUseNativeSessionBatching() {
+        let qwen = DS4ModelProfile(
+            family: .qwen38,
+            architecture: "qwen4exp",
+            nextnPredictLayers: 1
+        )
+        var config = ServerConfiguration.Config()
+        config.batchedSessions = 4
+        config.mtpMode = .embedded
+        config.mtpExactSampling = true
+
+        let errors = config.validationErrors(modelProfile: qwen)
+        XCTAssertNil(errors[.batchedSessions])
+        XCTAssertNil(errors[.mtpMode])
+
+        let args = DS4ServerCommand.arguments(
+            configuration: config,
+            resolvedModelPath: "/tmp/qwen.gguf",
+            resolvedMTPPath: "",
+            modelProfile: qwen
+        )
+        XCTAssertTrue(args.contains("--batched-session"))
+        XCTAssertTrue(args.contains("--mtp"))
+        XCTAssertTrue(args.contains("--mtp-exact-sampling"))
+    }
+
+    func testSessionBatchingRejectsMTPForOtherModelsAndModes() {
+        let glm = DS4ModelProfile(
+            family: .glm53Flash,
+            architecture: "glm5-next",
+            nextnPredictLayers: 1
+        )
+        var embedded = ServerConfiguration.Config()
+        embedded.batchedSessions = 2
+        embedded.mtpMode = .embedded
+        XCTAssertNotNil(embedded.validationErrors(modelProfile: glm)[.batchedSessions])
+
+        let deepSeek = DS4ModelProfile.from(architecture: "deepseek4")
+        for mode in [MTPMode.external, .dspark] {
+            var config = ServerConfiguration.Config()
+            config.batchedSessions = 2
+            config.mtpMode = mode
+            XCTAssertNotNil(
+                config.validationErrors(modelProfile: deepSeek)[.batchedSessions],
+                mode.rawValue
+            )
+        }
+
+        // A Qwen GGUF without nextn weights cannot speculate at all, so it
+        // keeps the conflict even though the family is otherwise eligible.
+        let qwenWithoutNextn = DS4ModelProfile(
+            family: .qwen38,
+            architecture: "qwen4exp",
+            nextnPredictLayers: 0
+        )
+        var bare = ServerConfiguration.Config()
+        bare.batchedSessions = 2
+        bare.mtpMode = .embedded
+        XCTAssertNotNil(bare.validationErrors(modelProfile: qwenWithoutNextn)[.batchedSessions])
+    }
+
+    /// The Settings panes and `validationErrors` must not drift apart; both
+    /// read the conflict from `hasBatchedSessionMTPConflict`.
+    func testBatchedSessionMTPConflictMatchesTheValidationError() {
+        let qwen = DS4ModelProfile(
+            family: .qwen38,
+            architecture: "qwen4exp",
+            nextnPredictLayers: 1
+        )
+        let profiles = [qwen, .from(architecture: "deepseek4"), .from(architecture: "glm5-next"), .unknown]
+        for profile in profiles {
+            for mode in MTPMode.allCases {
+                for sessions in [0, 4] {
+                    var config = ServerConfiguration.Config()
+                    config.batchedSessions = sessions
+                    config.mtpMode = mode
+                    XCTAssertEqual(
+                        config.hasBatchedSessionMTPConflict(modelProfile: profile),
+                        config.validationErrors(modelProfile: profile)[.batchedSessions] != nil,
+                        "\(profile.family.rawValue) \(mode.rawValue) \(sessions)"
+                    )
+                }
+            }
+        }
+    }
+
     func testValidationRejectsParserLimitsAndConflicts() {
         var config = ServerConfiguration.Config()
         config.port = 65_536

@@ -72,6 +72,30 @@ final class ModelSupportTests: XCTestCase {
         XCTAssertFalse(profile.supportsEmbeddedMTP)
     }
 
+    /// ds4-server batches sessions and MTP together only for Qwen with real
+    /// nextn weights; both halves of that gate are load-bearing.
+    func testOnlyQwenWithEmbeddedMTPWeightsSupportsBatchedMTP() {
+        let qwen = DS4ModelProfile(family: .qwen38, architecture: "qwen4exp", nextnPredictLayers: 1)
+        XCTAssertTrue(qwen.supportsBatchedEmbeddedMTP)
+
+        for withoutNextn in [
+            DS4ModelProfile(family: .qwen38, architecture: "qwen4exp", nextnPredictLayers: 0),
+            DS4ModelProfile.from(architecture: "qwen4exp")
+        ] {
+            XCTAssertFalse(withoutNextn.supportsBatchedEmbeddedMTP,
+                           String(describing: withoutNextn.nextnPredictLayers))
+        }
+
+        for architecture in ["glm5-next", "glm-dsa", "deepseek4", "deepseek41"] {
+            let profile = DS4ModelProfile(
+                family: DS4ModelProfile.from(architecture: architecture).family,
+                architecture: architecture,
+                nextnPredictLayers: 1
+            )
+            XCTAssertFalse(profile.supportsBatchedEmbeddedMTP, architecture)
+        }
+    }
+
     func testQwenVisionCompatibilityUsesMainMetadata() throws {
         let model = DS4ModelProfile(
             family: .qwen38,

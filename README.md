@@ -35,11 +35,23 @@ does not manage remote, distributed, Linux, CUDA, or ROCm servers.
 - macOS 26 or later
 - An Apple silicon Mac
 - A separately built `ds4-server` executable
+  ([see the version compatibility note below](#ds4-server-version-compatibility))
 - A compatible DwarfStar-specific main GGUF model
 
 Follow the [DwarfStar project](https://github.com/antirez/ds4) for server build
 instructions and model information. DS Menu Bar does not include `ds4-server`
 or model files.
+
+### ds4-server version compatibility
+
+> [!IMPORTANT]
+> At the time of this DS Menu Bar release, `ds4` does not publish versioned
+> releases. Compatibility is therefore tracked against specific commits on its
+> `main` branch, and DS Menu Bar is updated as upstream changes are reviewed.
+> The latest known compatible commit is
+> [`8db1d1d`](https://github.com/antirez/ds4/commit/8db1d1d155cb0400a86a86b9c62d0defb3a6148b)
+> (September 16, 2026). Newer versions of `ds4-server` may also work, but
+> compatibility is not guaranteed.
 
 ## Supported models
 
@@ -84,7 +96,7 @@ Model tab shows selected files and detected model details. Available controls
 and defaults adapt to the selected model and the Mac's unified memory.
 
 <p align="center">
-  <img src="docs/images/model-settings.png" width="936" alt="Model settings showing detected Qwen3.8 Flash Next details">
+  <img src="docs/images/model-settings.png" width="942" alt="Model settings showing detected Qwen3.8 Flash Next details">
 </p>
 
 ## Logs and request traces

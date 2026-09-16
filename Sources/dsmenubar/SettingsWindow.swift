@@ -764,6 +764,7 @@ struct SettingsView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
+        .defaultScrollAnchor(.center, for: .alignment)
         .frame(maxWidth: .infinity)
         .background(.bar)
     }
@@ -942,7 +943,7 @@ struct SettingsView: View {
                     "Resident sessions",
                     value: $draft.batchedSessions,
                     errorKey: .batchedSessions,
-                    note: "0 disables native batching. More sessions multiply context memory."
+                    note: "0 disables session batching. Each session keeps its own caches, so more sessions multiply context memory; supported models share one prefill workspace."
                 )
                 if draft.batchedSessions > 0 {
                     integerRow(
@@ -951,9 +952,11 @@ struct SettingsView: View {
                         errorKey: .mixedPrefillQuantum,
                         note: "The amount of prompt work allowed between active generations."
                     )
-                    Text("ds4-server cannot run native session batching and MTP together. Turn MTP off in the MTP pane to use batching.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    if mayExceedBatchedMTPDecodeWidth {
+                        Text("ds4-server speculates across at most \(ServerConfiguration.Config.maxBatchedEmbeddedMTPDecodeWidth) sessions decoding at once. MTP still applies beyond that, one session at a time.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -1219,9 +1222,9 @@ struct SettingsView: View {
                 }
             }
 
-            if draft.batchedSessions > 0 && draft.mtpMode != .off && modelProfile.isKnown {
+            if hasBatchedMTPConflict {
                 Section {
-                    Label("Set Resident sessions to 0 in the Server pane, or turn MTP off — ds4-server cannot run both.",
+                    Label("Set Resident sessions to 0 in the Server pane, or turn MTP off — this model cannot use both.",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
                         .foregroundStyle(.red)
@@ -1235,6 +1238,18 @@ struct SettingsView: View {
             return "Qwen supports one or two embedded draft tokens. --mtp-draft controls legacy external MTP."
         }
         return "GLM uses its fixed built-in MTP cycle. --mtp-draft controls legacy external MTP."
+    }
+
+    private var hasBatchedMTPConflict: Bool {
+        draft.hasBatchedSessionMTPConflict(modelProfile: modelProfile)
+    }
+
+    /// Enough resident slots that a decode cycle can outgrow the batched
+    /// speculative path. Whether it actually does depends on how many sessions
+    /// are live at once, so the note describes the cap rather than predicting it.
+    private var mayExceedBatchedMTPDecodeWidth: Bool {
+        draft.usesBatchedEmbeddedMTP(modelProfile: modelProfile) &&
+            draft.batchedSessions > ServerConfiguration.Config.maxBatchedEmbeddedMTPDecodeWidth
     }
 
     @ViewBuilder

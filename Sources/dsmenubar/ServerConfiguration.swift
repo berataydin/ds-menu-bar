@@ -566,6 +566,34 @@ extension ServerConfiguration.Config {
         }
     }
 
+    /// True when the selected model decodes batched sessions and MTP together.
+    /// ds4-server takes this path only for Qwen embedded MTP on Metal; see
+    /// `qwen4_batch_mtp` in ds4_server.c.
+    func usesBatchedEmbeddedMTP(modelProfile: DS4ModelProfile) -> Bool {
+        batchedSessions > 0 && mtpMode == .embedded &&
+            modelProfile.supportsBatchedEmbeddedMTP
+    }
+
+    /// True when batching and MTP are both requested but the model cannot run
+    /// them together. ds4-server does not refuse this combination — it starts
+    /// and silently drops MTP — so the conflict is surfaced here instead.
+    ///
+    /// The Settings panes render their own wording for this, so the rule lives
+    /// here rather than in the view: one model gaining batched MTP upstream
+    /// must not need matching edits in three places.
+    func hasBatchedSessionMTPConflict(modelProfile: DS4ModelProfile) -> Bool {
+        batchedSessions > 0 && mtpMode != .off && modelProfile.isKnown &&
+            !usesBatchedEmbeddedMTP(modelProfile: modelProfile)
+    }
+
+    /// The widest decode batch ds4-server speculates over in one pass, counted
+    /// in sessions ready to decode in that cycle rather than resident slots;
+    /// see `ds4_sessions_eval_batch_speculative_argmax`. A wider cycle keeps
+    /// MTP and takes the sequential fallback: one speculative cycle per
+    /// session. More resident slots than this are fine — only the sessions
+    /// decoding at the same moment count against it.
+    static let maxBatchedEmbeddedMTPDecodeWidth = 16
+
     /// Validate the constraints enforced by ds4-server's option parser plus
     /// cross-option constraints that would otherwise produce a misleading run.
     func validationErrors(
@@ -610,8 +638,9 @@ extension ServerConfiguration.Config {
 
         bounded(batchedSessions, field: .batchedSessions, label: "Resident sessions")
         if batchedSessions > 0 { bounded(mixedPrefillQuantum, field: .mixedPrefillQuantum, label: "Mixed prefill quantum") }
-        if batchedSessions > 0 && modelProfile.isKnown && mtpMode != .off {
-            errors[.batchedSessions] = "Native session batching disables MTP; turn off one of these features"
+        if hasBatchedSessionMTPConflict(modelProfile: modelProfile) {
+            errors[.batchedSessions] =
+                "\(modelProfile.displayName) cannot run session batching and MTP together; turn off one of these features"
         }
 
         if ssdStreamingEnabled {

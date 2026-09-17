@@ -20,15 +20,7 @@ final class ServerCommandTests: XCTestCase {
             "--ctx", "1000000",
             "--host", "127.0.0.1",
             "--port", "8000",
-            "--power", "100",
-            "--kv-disk-dir", "/tmp/ds4-kv",
-            "--kv-disk-space-mb", "131072",
-            "--kv-cache-min-tokens", "512",
-            "--kv-cache-cold-max-tokens", "30000",
-            "--kv-cache-continued-interval-tokens", "25000",
-            "--kv-cache-boundary-trim-tokens", "32",
-            "--kv-cache-boundary-align-tokens", "2048",
-            "--tool-memory-max-ids", "100000"
+            "--power", "100"
         ])
     }
 
@@ -399,11 +391,6 @@ final class ServerCommandTests: XCTestCase {
         XCTAssertEqual(args, [
             "--metal", "--model", "/tmp/v41.gguf",
             "--ctx", "\(config.ctxSize)", "--host", "127.0.0.1", "--port", "8000", "--power", "100",
-            "--kv-disk-dir", "/tmp/ds4-kv", "--kv-disk-space-mb", "131072",
-            "--kv-cache-min-tokens", "512", "--kv-cache-cold-max-tokens", "30000",
-            "--kv-cache-continued-interval-tokens", "25000",
-            "--kv-cache-boundary-trim-tokens", "32", "--kv-cache-boundary-align-tokens", "2048",
-            "--tool-memory-max-ids", "100000",
             "--vision", "/tmp/v41-vision.gguf"
         ])
     }
@@ -650,6 +637,9 @@ final class ServerCommandTests: XCTestCase {
         config.mtpMargin = 1_001
         config.ssdStreamingEnabled = true
         config.ssdStreamingCacheExperts = "40MB"
+        // KV bounds are only validated for an enabled cache, which is not the
+        // default.
+        config.kvDiskEnabled = true
         config.kvCacheMinTokens = 10_000
         config.kvCacheColdMaxTokens = 9_999
 

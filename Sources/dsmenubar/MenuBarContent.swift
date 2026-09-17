@@ -59,8 +59,11 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private let openAbout: () -> Void
     private let statusItem: NSStatusItem
     private var cancellables = Set<AnyCancellable>()
+    private var blinkTimer: AnyCancellable?
     private var blinkOn = false
     private var menuIsOpen = false
+    private var rendered: RenderedStatusItem?
+    private var renderedStatusInformation: String?
 
     private let serverItem = NSMenuItem(title: "ds4-server", action: nil, keyEquivalent: "")
     private let statusTextItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -70,6 +73,20 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         action: nil,
         keyEquivalent: ""
     )
+    private let keepAwakeItem = NSMenuItem(
+        title: "Keep Awake While Server Runs",
+        action: nil,
+        keyEquivalent: ""
+    )
+
+    /// What the status button was last given. Every assignment to a status
+    /// item's title relayouts the menu bar, and most updates that reach here
+    /// carry nothing new — a rate that renders to the same four columns, or a
+    /// status change while speeds are hidden.
+    private struct RenderedStatusItem: Equatable {
+        let glyph: String
+        let performance: ServerPerformance.DisplayIdentity?
+    }
 
     init(
         server: ServerManager,
@@ -84,20 +101,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
         statusItem.menu = makeMenu()
         observeServer()
+        updateBlinkTimer()
         updateStatusButton()
+        updateStatusInformation()
         refreshMenu()
-
-        Timer.publish(every: 0.5, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                guard let self else { return }
-                blinkOn.toggle()
-                if server.status.isTransitional {
-                    updateStatusButton()
-                }
-            }
-            .store(in: &cancellables)
-
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -123,6 +130,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         speedItem.target = self
         speedItem.action = #selector(toggleSpeedDisplay)
         speedItem.isEnabled = true
+        keepAwakeItem.target = self
+        keepAwakeItem.action = #selector(toggleKeepAwake)
+        keepAwakeItem.isEnabled = true
 
         menu.addItem(serverItem)
         menu.addItem(statusTextItem)
@@ -130,6 +140,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(serverActionItem)
         menu.addItem(item("Open Log in Console", action: #selector(openLog)))
         menu.addItem(speedItem)
+        menu.addItem(keepAwakeItem)
         menu.addItem(.separator())
         menu.addItem(item("Settings…", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(.separator())
@@ -151,19 +162,70 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return item
     }
 
-    /// This fires twice a second while the server generates. Only the status
-    /// button has to keep up with that; the menu is rebuilt in menuWillOpen,
-    /// and while it is open, so a status change lands under the cursor.
+    /// Observe each input on the narrowest update path it needs. In particular,
+    /// throughput records redraw only the visible title: they do not rewrite the
+    /// status tooltip, the VoiceOver label, or the open menu.
+    ///
+    /// Delivery is hopped to the main queue because `@Published` publishes in
+    /// `willSet`: a subscriber that runs synchronously still reads the previous
+    /// value off the property.
     private func observeServer() {
-        server.objectWillChange
+        server.$status
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    updateStatusButton()
-                    if menuIsOpen { refreshMenu() }
-                }
+                guard let self else { return }
+                updateBlinkTimer()
+                updateStatusButton()
+                updateStatusInformation()
+                if menuIsOpen { refreshMenu() }
             }
             .store(in: &cancellables)
+
+        server.$performance
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateStatusButton()
+            }
+            .store(in: &cancellables)
+
+        server.$showsPerformanceInMenuBar
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                updateStatusButton()
+                if menuIsOpen { refreshMenu() }
+            }
+            .store(in: &cancellables)
+
+        Publishers.Merge(
+            server.$keepsAwakeWhileRunning.map { _ in () },
+            server.$keepAwakeState.map { _ in () }
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] in
+            guard let self else { return }
+            if menuIsOpen { refreshMenu() }
+        }
+        .store(in: &cancellables)
+    }
+
+    /// The blink means something only mid-transition. Running it for the app's
+    /// whole lifetime woke the main run loop twice a second with the server
+    /// stopped and nothing to animate.
+    private func updateBlinkTimer() {
+        guard server.status.isTransitional else {
+            blinkTimer = nil
+            blinkOn = false
+            return
+        }
+        guard blinkTimer == nil else { return }
+        blinkTimer = Timer.publish(every: 0.5, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                blinkOn.toggle()
+                updateStatusButton()
+            }
     }
 
     private func updateStatusButton() {
@@ -174,6 +236,15 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         } else {
             glyph = server.status.steadyGlyph
         }
+
+        let current = RenderedStatusItem(
+            glyph: glyph,
+            performance: server.showsPerformanceInMenuBar
+                ? server.performance.displayIdentity
+                : nil
+        )
+        guard current != rendered else { return }
+        rendered = current
 
         if server.showsPerformanceInMenuBar {
             statusItem.length = NSStatusItem.variableLength
@@ -188,24 +259,30 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             button.title = glyph
         }
         button.lineBreakMode = .byClipping
-        button.setAccessibilityLabel(accessibilityLabel)
-        button.toolTip = "DS Menu Bar — \(server.status.menuText)"
     }
 
-    /// Spelled out, because the rendered title is a star glyph and fields
-    /// abbreviated to hold a fixed width.
-    private var accessibilityLabel: String {
-        let status = "DS Menu Bar — \(server.status.menuText)"
-        guard server.showsPerformanceInMenuBar,
-              let speed = server.performance.spokenDescription
-        else { return status }
-        return "\(status), \(speed)"
+    /// Status information is intentionally independent of throughput. A speed
+    /// update must not cause assistive technology or the tooltip to receive a
+    /// stream of otherwise identical updates.
+    private func updateStatusInformation() {
+        guard let button = statusItem.button else { return }
+        let information = "DS Menu Bar — \(server.status.menuText)"
+        guard information != renderedStatusInformation else { return }
+        renderedStatusInformation = information
+        button.setAccessibilityLabel(information)
+        button.toolTip = information
     }
 
     private func refreshMenu() {
         statusTextItem.title = "Status: \(server.status.menuText)"
         serverActionItem.title = server.status.actionTitle
         speedItem.state = server.showsPerformanceInMenuBar ? .on : .off
+        // The check mark is the preference. The subtitle is what it is doing
+        // now, which differs whenever the Mac is on battery or nothing is
+        // running — an item that claimed to be keeping the Mac awake while it
+        // was not would be worse than no item at all.
+        keepAwakeItem.state = server.keepsAwakeWhileRunning ? .on : .off
+        keepAwakeItem.subtitle = server.keepAwakeState.menuSubtitle
     }
 
     @objc private func toggleServer() {
@@ -224,6 +301,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func toggleSpeedDisplay() {
         server.setShowsPerformanceInMenuBar(!server.showsPerformanceInMenuBar)
+    }
+
+    @objc private func toggleKeepAwake() {
+        server.setKeepsAwakeWhileRunning(!server.keepsAwakeWhileRunning)
     }
 
     @objc private func showSettings() {

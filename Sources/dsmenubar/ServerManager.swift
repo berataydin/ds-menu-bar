@@ -27,6 +27,16 @@ extension ServerStatus {
         default: return false
         }
     }
+
+    /// States in which a ds4-server process is live or on its way to being so.
+    /// Model load and Metal residency happen during .starting, which is the
+    /// longest unattended stretch of a run and precisely what keep-awake is for.
+    var holdsServerProcess: Bool {
+        switch self {
+        case .starting, .restarting, .running, .stopping: return true
+        case .stopped, .error: return false
+        }
+    }
 }
 
 // MARK: - ServerManager (thin orchestrator)
@@ -48,9 +58,20 @@ final class ServerManager: ObservableObject {
     private let healthChecker = HealthChecker()
     private let log = OSLog(subsystem: "com.jiiim.ds-menu-bar", category: "orchestrator")
 
-    @Published private(set) var status: ServerStatus = .stopped
+    @Published private(set) var status: ServerStatus = .stopped {
+        didSet { refreshKeepAwake() }
+    }
     @Published private(set) var performance: ServerPerformance = .idle
     @Published private(set) var showsPerformanceInMenuBar: Bool
+    @Published private(set) var keepsAwakeWhileRunning: Bool
+    @Published private(set) var keepAwakeState: KeepAwakeState = .off
+
+    // ASCII only: pmset mangles non-ASCII in assertion names, and the name
+    // exists to be read there.
+    private let idleSleepAssertion = IdleSleepAssertion(
+        name: "DS Menu Bar: ds4-server is running"
+    )
+    private let externalPower = ExternalPowerMonitor()
 
     private var performancePolicy = PerformanceDisplayPolicy()
     private var performancePublishWorkItem: DispatchWorkItem?
@@ -69,8 +90,19 @@ final class ServerManager: ObservableObject {
 
     init() {
         showsPerformanceInMenuBar = config.showsPerformanceInMenuBar
+        keepsAwakeWhileRunning = config.keepsAwakeWhileRunning
         wireCallbacks()
         processManager.setPerformanceMonitoring(showsPerformanceInMenuBar)
+        externalPower.onChange = { [weak self] in
+            self?.refreshKeepAwake()
+        }
+        externalPower.start()
+        refreshKeepAwake()
+    }
+
+    deinit {
+        externalPower.stop()
+        idleSleepAssertion.release()
     }
 
     /// Establish the callback graph so each component reports back to us.
@@ -112,6 +144,14 @@ final class ServerManager: ObservableObject {
                 // relaunch once the port it held is free again. Status is left
                 // untouched so the menu keeps showing "Restarting…".
                 self.startWhenPortAvailable()
+            } else if let reason = info.failureReason {
+                // A detected failure outranks how the child ultimately exits.
+                // terminate(withFailureReason:) deliberately sends SIGTERM, so
+                // that stop is "intentional" at the process layer and the server
+                // may even handle it as a clean exit. Neither outcome turns the
+                // health failure into a user-requested stop.
+                self.status = .error(reason)
+                self.postNotification(title: "ds4-server stopped", body: reason)
             } else if info.intentional {
                 self.activeLaunchSource = nil
                 self.activeLaunchAttemptID = nil
@@ -127,12 +167,6 @@ final class ServerManager: ObservableObject {
                 self.activeLaunchSource = nil
                 self.activeLaunchAttemptID = nil
                 self.status = .stopped
-            } else if let reason = info.failureReason {
-                // We terminated it after detecting a failure (for example, an
-                // unreachable running server). Preserve that cause rather than relabeling
-                // it as a signal kill, and notify with accurate wording.
-                self.status = .error(reason)
-                self.postNotification(title: "ds4-server stopped", body: reason)
             } else {
                 // Spontaneous, unexpected exit — a genuine crash.
                 let how = "exited unexpectedly"
@@ -200,6 +234,16 @@ final class ServerManager: ObservableObject {
             apply(performancePolicy.reset(now: Date()))
         }
         processManager.setPerformanceMonitoring(requested)
+    }
+
+    /// Apply the keep-awake preference immediately. Like the display preference
+    /// above, it is an app-only setting: it does not alter ds4-server's command
+    /// line and must not enter the Apply & Restart path.
+    func setKeepsAwakeWhileRunning(_ requested: Bool) {
+        guard requested != keepsAwakeWhileRunning else { return }
+        config.setKeepsAwakeWhileRunning(requested)
+        keepsAwakeWhileRunning = requested
+        refreshKeepAwake()
     }
 
     /// Snapshot used by Settings to edit a draft without mutating the running
@@ -388,6 +432,27 @@ final class ServerManager: ObservableObject {
         processManager.startWhenPortAvailable(host: current.host, port: current.port)
         // When the port is free, onPortAvailable fires → start(source: .restart)
         // → launch + health polling. We keep .restarting until healthy.
+    }
+
+    // MARK: - Keep awake
+
+    /// Reconciles the assertion with the preference, the run state, and the
+    /// power source. Called from `status`'s observer, the preference setter, and
+    /// the power-source notification, so every input that can change the answer
+    /// arrives here.
+    private func refreshKeepAwake() {
+        let state = KeepAwakePolicy.state(
+            preferenceEnabled: keepsAwakeWhileRunning,
+            status: status,
+            onExternalPower: externalPower.isOnExternalPower
+        )
+        if state == .active {
+            idleSleepAssertion.hold()
+        } else {
+            idleSleepAssertion.release()
+        }
+        guard state != keepAwakeState else { return }
+        keepAwakeState = state
     }
 
     // MARK: - Performance display

@@ -46,6 +46,30 @@ final class HealthChecker {
     /// deadline — a startup past this point is still perfectly valid.
     static let stallAdvisoryInterval: TimeInterval = 600
 
+    /// A private session rather than `URLSession.shared`. The shared session's
+    /// cookie and cache storage gives the process a CFNetwork storage database,
+    /// and macOS attributes the assertion taken while that database is flushed
+    /// to this app — which is why Activity Monitor reported DS Menu Bar as
+    /// preventing sleep despite the app holding no assertion of its own. A
+    /// loopback readiness probe needs neither cookies nor a response cache.
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
+    /// Consecutive failed polls required before a confirmed-healthy server is
+    /// terminated. One failed poll used to be enough, which made any two-second
+    /// stall fatal — a wake from sleep lands a poll while the server's pages are
+    /// still being faulted back in, and nothing here knows a sleep happened.
+    /// Three polls cost at most ~30s of extra detection latency, which nothing
+    /// is waiting on, and the server they protect can take minutes to reload.
+    private static let failureThreshold = 3
+
+    private var consecutiveFailures = 0
     private var healthTimer: DispatchSourceTimer?
     private var healthURL: URL?
     private var startupBegan: Date?
@@ -68,6 +92,7 @@ final class HealthChecker {
     /// memory pressure, and the Mac's current state.
     func startPolling(url: URL) {
         healthURL = url
+        consecutiveFailures = 0
         startupBegan = Date()
         stallAdvisoryPosted = false
         scheduleHealthTimer(interval: Self.fastInterval)
@@ -78,6 +103,7 @@ final class HealthChecker {
     func stop() {
         generation &+= 1
         healthTimer?.cancel(); healthTimer = nil
+        consecutiveFailures = 0
         healthURL = nil
         startupBegan = nil
         stallAdvisoryPosted = false
@@ -115,13 +141,14 @@ final class HealthChecker {
         guard let url = healthURL else { return }
         let issued = generation
         let req = URLRequest(url: url, timeoutInterval: 2)
-        URLSession.shared.dataTask(with: req) { [weak self] _, response, error in
+        Self.session.dataTask(with: req) { [weak self] _, response, error in
             guard let s = self else { return }
             DispatchQueue.main.async {
                 // Superseded by a stop, a restart, or a cadence change.
                 guard issued == s.generation else { return }
                 if let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 {
                     // Server is alive and answering.
+                    s.consecutiveFailures = 0
                     if s.isStartingUp?() == true {
                         // PID is resolved by the orchestrator; we just signal success.
                         s.startupBegan = nil
@@ -133,9 +160,17 @@ final class HealthChecker {
                 } else {
                     let errMsg = error.map { $0.localizedDescription }
                         ?? "HTTP \(String(describing: (response as? HTTPURLResponse)?.statusCode))"
-                    // If it was running and now unreachable, report failure.
+                    // If it was running and now unreachable, report failure —
+                    // but only once a run of polls has failed, so a single
+                    // stalled request cannot kill a working server.
                     if s.isRunning?() == true {
-                        s.onUnreachable?("unreachable: \(errMsg)")
+                        s.consecutiveFailures += 1
+                        if s.consecutiveFailures >= Self.failureThreshold {
+                            s.consecutiveFailures = 0
+                            s.onUnreachable?(
+                                "unreachable for \(Self.failureThreshold) checks: \(errMsg)"
+                            )
+                        }
                     }
                     // If still starting, keep trying. Model loading and Metal
                     // residency happen before the listener exists. Once past the

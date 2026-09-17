@@ -108,22 +108,58 @@ final class ServerPerformanceTests: XCTestCase {
         } + [CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))]
     }
 
-    func testSpokenDescriptionReplacesTheAbbreviatedFields() {
-        XCTAssertEqual(
-            ServerPerformance(phase: .generation, tokensPerSecond: 36.74).spokenDescription,
-            "Generation 36.7 tokens per second"
-        )
-        XCTAssertEqual(
-            ServerPerformance(phase: .prefill, tokensPerSecond: 1_234).spokenDescription,
-            "Prefill 1234 tokens per second"
-        )
-        XCTAssertNil(ServerPerformance.idle.spokenDescription)
-        XCTAssertNil(
-            ServerPerformance(phase: .generation, tokensPerSecond: nil).spokenDescription
+    // MARK: - Display policy
+
+    /// The rate field holds four columns, so ds4-server's extra precision is
+    /// discarded before anything is drawn. Two records that reduce to the same
+    /// characters are the same value as far as the user is concerned.
+    func testDisplayIdentityIgnoresPrecisionTheFieldsCannotShow() {
+        let coarse = ServerPerformance(phase: .generation, tokensPerSecond: 12.31)
+        let finer = ServerPerformance(phase: .generation, tokensPerSecond: 12.34)
+        XCTAssertNotEqual(coarse, finer)
+        XCTAssertEqual(coarse.displayIdentity, finer.displayIdentity)
+
+        let fast = ServerPerformance(phase: .prefill, tokensPerSecond: 388.30)
+        let faster = ServerPerformance(phase: .prefill, tokensPerSecond: 388.40)
+        XCTAssertEqual(fast.displayIdentity, faster.displayIdentity)
+
+        let changed = ServerPerformance(phase: .generation, tokensPerSecond: 13.31)
+        XCTAssertNotEqual(coarse.displayIdentity, changed.displayIdentity)
+        // Same rate, different phase: the glyph changes even though the field
+        // does not.
+        XCTAssertNotEqual(
+            coarse.displayIdentity,
+            ServerPerformance(phase: .prefill, tokensPerSecond: 12.31).displayIdentity
         )
     }
 
-    // MARK: - Display policy
+    /// A converged average produces a record every few dozen milliseconds that
+    /// renders to the same four characters. Publishing those redrew the status
+    /// item twice a second to no visible effect.
+    func testPolicySuppressesAPublishThatChangesNothingOnScreen() {
+        var policy = PerformanceDisplayPolicy()
+        let start = Date(timeIntervalSinceReferenceDate: 0)
+        let shown = ServerPerformance(phase: .generation, tokensPerSecond: 30.0)
+        let indistinguishable = ServerPerformance(phase: .generation, tokensPerSecond: 30.04)
+        let different = ServerPerformance(phase: .generation, tokensPerSecond: 31.0)
+
+        XCTAssertEqual(policy.receive(shown, now: start), [.display(shown)])
+        // The coalescing window has elapsed, so this takes the publish path
+        // and is dropped there rather than being queued.
+        XCTAssertEqual(policy.receive(indistinguishable, now: start.addingTimeInterval(0.5)), [])
+        XCTAssertEqual(policy.displayed, indistinguishable)
+
+        // The suppressed publish still consumed the window, so a value that
+        // does change the display is coalesced against it.
+        XCTAssertEqual(
+            policy.receive(different, now: start.addingTimeInterval(0.75)),
+            [.schedulePublish(after: 0.25)]
+        )
+        XCTAssertEqual(
+            policy.publishTimerFired(now: start.addingTimeInterval(1)),
+            [.display(different)]
+        )
+    }
 
     func testPolicyPublishesAPhaseChangeWithoutWaitingOutTheWindow() {
         var policy = PerformanceDisplayPolicy()

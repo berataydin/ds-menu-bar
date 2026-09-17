@@ -1,8 +1,12 @@
 <p align="center">
-  <img src="docs/images/app-icon.png" width="128" alt="DS Menu Bar app icon">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/banner-white-text.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/banner-black-text.png">
+    <img src="docs/images/banner-black-text.png" width="640" alt="DS Menu Bar - jiiim/ds-menu-bar">
+  </picture>
 </p>
 
-<h1 align="center">DS Menu Bar</h1>
+## Overview
 
 DS Menu Bar is a native macOS menu bar app for starting, stopping, and
 configuring one local [`ds4-server`](https://github.com/antirez/ds4) process.
@@ -18,7 +22,8 @@ does not manage remote, distributed, Linux, CUDA, or ROCm servers.
 
 ## What it does
 
-- Starts, stops, and monitors `ds4-server`.
+- Starts, stops, and monitors `ds4-server` from
+  [DwarfStar](https://github.com/antirez/ds4).
 - Shows the server state and process ID in the menu bar.
 - Can show current prefill and generation throughput in a fixed-width menu-bar
   display.
@@ -28,14 +33,16 @@ does not manage remote, distributed, Linux, CUDA, or ROCm servers.
   before starting the server.
 - Captures server output in a rotating log that can be opened in Console.
 - Can optionally record a request trace for diagnostics.
+- Can keep the Mac awake while the server runs, when it is connected to a
+  power adapter.
 - Can launch automatically when you log in.
 
 ## Requirements
 
 - macOS 26 or later
 - An Apple silicon Mac
-- A separately built `ds4-server` executable
-  ([see the version compatibility note below](#ds4-server-version-compatibility))
+- A separately built `ds4-server` executable ([see the version compatibility
+  note below](#ds4-server-version-compatibility))
 - A compatible DwarfStar-specific main GGUF model
 
 Follow the [DwarfStar project](https://github.com/antirez/ds4) for server build
@@ -45,10 +52,10 @@ or model files.
 ### ds4-server version compatibility
 
 > [!IMPORTANT]
-> At the time of this DS Menu Bar release, `ds4` does not publish versioned
-> releases. Compatibility is therefore tracked against specific commits on its
-> `main` branch, and DS Menu Bar is updated as upstream changes are reviewed.
-> The latest known compatible commit is
+> At the time of the DS Menu Bar v0.0.4 release, `ds4` does not publish
+> versioned releases. Compatibility is therefore tracked against specific
+> commits on its `main` branch, and DS Menu Bar is updated as upstream changes
+> are reviewed. The latest known compatible commit is
 > [`8db1d1d`](https://github.com/antirez/ds4/commit/8db1d1d155cb0400a86a86b9c62d0defb3a6148b)
 > (September 16, 2026). Newer versions of `ds4-server` may also work, but
 > compatibility is not guaranteed.
@@ -68,7 +75,8 @@ arbitrary GGUF models are not supported.
 
 1. Download the DMG and its `.sha256` file from the
    [latest release](https://github.com/jiiim/ds-menu-bar/releases/latest).
-2. In Terminal, verify the download from the directory containing both files:
+2. Optional: verify the download from the directory containing both files, in
+   Terminal:
 
    ```sh
    shasum -a 256 -c DS-Menu-Bar-vX.Y.Z-arm64.dmg.sha256
@@ -91,9 +99,39 @@ After setup, use the star icon in the menu bar to start or stop the server,
 open its log, or open Settings. Applying settings while the server is running
 restarts it with the updated configuration.
 
-The General tab in Settings shows the generated command before it is run. The
-Model tab shows selected files and detected model details. Available controls
-and defaults adapt to the selected model and the Mac's unified memory.
+## Settings
+
+Settings is organized into seven tabs. Available controls and defaults adapt
+to the selected model and the Mac's unified memory.
+
+- **General**: launch at login, the optional menu-bar throughput display,
+  keeping the Mac awake while the server runs, a preview of the command that
+  runs on Apply, and a restore of model tuning defaults.
+- **Model**: the `ds4-server` executable and main GGUF model, detected model
+  details, and vision encoder settings for models that support them.
+- **Server**: the HTTP host and port, browser client access, the default
+  output token limit, and resident session batching.
+- **Performance**: context size, prefill chunk, GPU power limit, CPU helper
+  threads, kernel selection, and SSD-backed model streaming for models that
+  do not fit comfortably in available unified memory.
+- **KV Cache**: optional disk checkpoints so later prompts and restarted
+  sessions can reuse compatible prefixes, with a disk budget and checkpoint
+  policies.
+- **MTP**: optional speculative decoding through embedded or support-GGUF
+  drafters, with draft depth, confidence, and sampling controls where the
+  model supports them.
+- **Diagnostics**: log location, size, and deletion; optional request
+  tracing; and a simulated used-memory value for testing memory pressure.
+
+Keep awake holds an idle-sleep assertion only while a server process is live
+and the Mac is on a power adapter, so an unattended prefill or generation is
+not cut short by the idle timer. The display still sleeps on its own
+schedule, and closing the lid or sleeping from the Apple menu still sleeps
+the Mac. The same switch is in the menu bar, where the check mark is the
+preference and the subtitle below it reports whether the assertion is
+currently held.
+
+The Model tab for a detected Qwen3.8 Flash Next model:
 
 <p align="center">
   <img src="docs/images/model-settings.png" width="942" alt="Model settings showing detected Qwen3.8 Flash Next details">
@@ -136,10 +174,21 @@ Source builds use an ad hoc signature and are intended for local development.
 Disable **Launch at login** in Settings, quit DS Menu Bar, and move
 `/Applications/DS Menu Bar.app` to the Trash.
 
+## Logo and App Icon
+
+The logo for DS Menu Bar is a four pointed star, an homage to the name of the
+DwarfStar project. Four points for the star were chosen in reference to the `4`
+in `ds4-server` and the original `ds4.c` name of the DwarfStar project. For
+the app icon, the four pointed star sits high on a purple background, like
+a star in the evening sky. In the menu bar, when `ds4-server` is running, the
+star is solid. When `ds4-server` is not running, the star is just an outline.
+While `ds4-server` is starting, the star oscillates between solid and outline.
+
 ## License
 
 DS Menu Bar source code and original bundled assets are available under the
 [MIT License](LICENSE). Copyright 2026 James Martin.
 
-`ds4-server`, GGUF models, macOS, and Xcode are separate works and are not
-licensed by this project. Refer to their respective terms and licenses.
+DwarfStar, `ds4-server`, GGUF models, macOS, and Xcode are separate works
+and are not licensed by this project. Refer to their respective terms and
+licenses.

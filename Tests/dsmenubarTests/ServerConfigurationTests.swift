@@ -31,6 +31,25 @@ final class ServerConfigurationTests: XCTestCase {
         XCTAssertTrue(ServerConfiguration(defaults: defaults).showsPerformanceInMenuBar)
     }
 
+    func testKeepAwakePreferencePersistsOutsideServerConfig() throws {
+        let suiteName = "dsmenubar-tests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated defaults")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let configuration = ServerConfiguration(defaults: defaults)
+        let serverConfig = configuration.snapshot()
+        XCTAssertFalse(configuration.keepsAwakeWhileRunning)
+
+        configuration.setKeepsAwakeWhileRunning(true)
+
+        XCTAssertTrue(configuration.keepsAwakeWhileRunning)
+        XCTAssertEqual(configuration.snapshot(), serverConfig)
+        XCTAssertTrue(ServerConfiguration(defaults: defaults).keepsAwakeWhileRunning)
+    }
+
     func testInitialSetupIsPromptedOnlyBeforeItIsCompleted() throws {
         let suiteName = "dsmenubar-tests-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {

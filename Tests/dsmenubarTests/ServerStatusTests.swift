@@ -67,6 +67,17 @@ final class ServerStatusTests: XCTestCase {
         XCTAssertEqual(ServerStatus.stopping.actionTitle, "Stop Server")
     }
 
+    // MARK: - holdsServerProcess
+
+    func testHoldsServerProcess() {
+        XCTAssertTrue(ServerStatus.starting.holdsServerProcess)
+        XCTAssertTrue(ServerStatus.restarting.holdsServerProcess)
+        XCTAssertTrue(ServerStatus.running(pid: 1).holdsServerProcess)
+        XCTAssertTrue(ServerStatus.stopping.holdsServerProcess)
+        XCTAssertFalse(ServerStatus.stopped.holdsServerProcess)
+        XCTAssertFalse(ServerStatus.error("x").holdsServerProcess)
+    }
+
     // MARK: - Equatable
 
     func testEquatable() {

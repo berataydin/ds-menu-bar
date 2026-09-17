@@ -11,14 +11,6 @@ struct ServerPerformance: Equatable {
         case idle = "-"
         case prefill = "P"
         case generation = "G"
-
-        var spokenName: String {
-            switch self {
-            case .idle: return "Idle"
-            case .prefill: return "Prefill"
-            case .generation: return "Generation"
-            }
-        }
     }
 
     let phase: Phase
@@ -42,17 +34,17 @@ struct ServerPerformance: Equatable {
         phase != .idle && Self.isDisplayable(tokensPerSecond)
     }
 
-    /// What VoiceOver reads. The rendered fields are abbreviated to hold a
-    /// fixed width — "P" and a clipped "1.2k" do not survive being spoken.
-    var spokenDescription: String? {
-        guard hasDisplayableRate, let tokensPerSecond else { return nil }
-        let format = tokensPerSecond < 100 ? "%.1f" : "%.0f"
-        let rate = String(
-            format: format,
-            locale: Locale(identifier: "en_US_POSIX"),
-            tokensPerSecond
-        )
-        return "\(phase.spokenName) \(rate) tokens per second"
+    /// The two rendered fields, which is everything the menu bar shows.
+    /// ds4-server reports far more precision than four columns can display, so
+    /// consecutive records routinely reduce to the same identity — and
+    /// replacing one with another of those changes nothing on screen.
+    struct DisplayIdentity: Equatable {
+        let phase: String
+        let rate: String
+    }
+
+    var displayIdentity: DisplayIdentity {
+        DisplayIdentity(phase: menuBarPhase, rate: menuBarRate)
     }
 
     /// Four columns at every magnitude. Prefill rates can exceed 1,000 t/s,
@@ -87,7 +79,9 @@ struct ServerPerformance: Equatable {
 /// a fast model — which is both unreadable and a needless stream of view
 /// updates. So: publish a phase change at once, coalesce same-phase rate
 /// changes to `publishInterval`, and when a request ends hold its final rate
-/// for `holdInterval` instead of blanking the display immediately.
+/// for `holdInterval` instead of blanking the display immediately. A value that
+/// renders to the same characters as the one already shown is not published at
+/// all.
 struct PerformanceDisplayPolicy {
     static let publishInterval: TimeInterval = 0.5
     static let holdInterval: TimeInterval = 1.5
@@ -176,8 +170,13 @@ struct PerformanceDisplayPolicy {
         _ update: ServerPerformance,
         now: Date
     ) -> [Effect] {
+        let wasDisplaying = displayed.displayIdentity
         displayed = update
         lastPublish = now
+        // The coalescing window is still consumed — this counts as the publish
+        // for this interval — but a value that renders and reads identically
+        // gives the menu bar nothing to redraw.
+        guard update.displayIdentity != wasDisplaying else { return [] }
         return [.display(update)]
     }
 

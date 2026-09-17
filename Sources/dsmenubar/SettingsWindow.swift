@@ -312,6 +312,13 @@ struct SettingsView: View {
         )
     }
 
+    private var keepAwakeBinding: Binding<Bool> {
+        Binding(
+            get: { server.keepsAwakeWhileRunning },
+            set: { server.setKeepsAwakeWhileRunning($0) }
+        )
+    }
+
     private var applyTitle: String {
         switch server.status {
         case .starting, .running, .restarting:
@@ -810,6 +817,15 @@ struct SettingsView: View {
                     isOn: performanceDisplayBinding
                 )
                 .help("Displays P for Prefill and G for Generation token rates.")
+                Toggle(
+                    "Keep Mac awake while the server is running",
+                    isOn: keepAwakeBinding
+                )
+                .help(
+                    "Only when connected to a power adapter. The display still "
+                    + "sleeps, and closing the lid or sleeping from the Apple "
+                    + "menu still sleeps the Mac."
+                )
                 LabeledContent("Platform") {
                     Text("macOS • Apple silicon • Metal")
                         .foregroundStyle(.secondary)
@@ -835,12 +851,15 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Restore All Tuning Defaults", role: .destructive) {
-                    draft = draft.restoringTuningDefaults(for: modelProfile)
-                    showNotice("Tuning defaults restored for \(modelProfile.displayName) in this draft. Apply to use them.")
+                VStack(alignment: .leading, spacing: 4) {
+                    Button("Restore All Tuning Defaults", role: .destructive) {
+                        draft = draft.restoringTuningDefaults(for: modelProfile)
+                        showNotice("Tuning defaults restored for \(modelProfile.displayName) in this draft. Apply to use them.")
+                    }
+                    Text("Restores tuning and feature settings for the selected model while preserving its model paths and the app's General, Server, and Diagnostics settings. Changes take effect only after Apply.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
-            } footer: {
-                Text("Restores tuning and feature settings for the selected model while preserving its model paths and the app's General, Server, and Diagnostics settings. Changes take effect only after Apply.")
             }
         }
     }
@@ -1039,18 +1058,25 @@ struct SettingsView: View {
             }
 
             Section {
-                if modelProfile.supportsSSDStreaming {
-                    Toggle("Use SSD-backed model streaming", isOn: $draft.ssdStreamingEnabled)
-                } else {
-                    LabeledContent("SSD-backed model streaming") {
-                        Text("Unavailable for \(modelProfile.displayName)").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    if modelProfile.supportsSSDStreaming {
+                        Toggle("Use SSD-backed model streaming", isOn: $draft.ssdStreamingEnabled)
+                    } else {
+                        LabeledContent("SSD-backed model streaming") {
+                            Text("Unavailable for \(modelProfile.displayName)").foregroundStyle(.secondary)
+                        }
                     }
-                    if draft.ssdStreamingEnabled {
-                        Button("Turn Off SSD Streaming") { draft.ssdStreamingEnabled = false }
+                    Text(modelProfile.isFullGLM
+                         ? "Automatic SSD streaming is the recommended starting point for full GLM on a 128 GB Mac. Context and expert caches share unified memory with macOS and other processes."
+                         : "SSD streaming uses this Mac's local storage for models that do not fit comfortably in available unified memory.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let error = validationErrors[.ssdStreamingEnabled] {
+                        validationLabel(error)
                     }
                 }
-                if let error = validationErrors[.ssdStreamingEnabled] {
-                    validationLabel(error)
+                if !modelProfile.supportsSSDStreaming && draft.ssdStreamingEnabled {
+                    Button("Turn Off SSD Streaming") { draft.ssdStreamingEnabled = false }
                 }
                 if draft.ssdStreamingEnabled {
                     Toggle("Skip the default expert-cache preload", isOn: $draft.ssdStreamingCold)
@@ -1077,10 +1103,6 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("SSD streaming")
-            } footer: {
-                Text(modelProfile.isFullGLM
-                     ? "Automatic SSD streaming is the recommended starting point for full GLM on a 128 GB Mac. Context and expert caches share unified memory with macOS and other processes."
-                     : "SSD streaming uses this Mac's local storage for models that do not fit comfortably in available unified memory.")
             }
         }
     }

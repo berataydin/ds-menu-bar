@@ -228,7 +228,7 @@ struct DS4TuningProfile: Codable, Equatable {
     var ssdStreamingCacheExperts = ""
     var ssdStreamingFullLayers = -1
     var ssdStreamingPreloadExperts = 0
-    var kvDiskEnabled = true
+    var kvDiskEnabled = false
     var kvDiskSpaceMB = 131_072
     var kvCacheMinTokens = 512
     var kvCacheColdMaxTokens = 30_000
@@ -297,6 +297,10 @@ struct DS4TuningProfile: Codable, Equatable {
         }
         if profile.prefillChunk > 0 {
             profile.prefillChunk = min(profile.prefillChunk, profile.ctxSize)
+        }
+        if modelProfile.family == .qwen38 && modelProfile.supportsEmbeddedMTP {
+            profile.mtpMode = .embedded
+            profile.qwenMTPDepth = .automatic
         }
         return profile
     }

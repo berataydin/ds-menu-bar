@@ -16,11 +16,13 @@ final class ServerConfiguration {
     private var values = Config()
     private let defaults: UserDefaults
     private(set) var showsPerformanceInMenuBar: Bool
+    private(set) var keepsAwakeWhileRunning: Bool
     private let log = OSLog(subsystem: "com.jiiim.ds-menu-bar", category: "config")
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         showsPerformanceInMenuBar = defaults.bool(forKey: Self.performanceDisplayKey)
+        keepsAwakeWhileRunning = defaults.bool(forKey: Self.keepAwakeKey)
         loadConfig()
     }
 
@@ -64,8 +66,9 @@ final class ServerConfiguration {
         /// Zero means automatic; otherwise this must be positive.
         var ssdStreamingPreloadExperts = 0
 
-        // Disk KV cache.
-        var kvDiskEnabled = true
+        // Disk KV cache. Off by default: it writes checkpoints under kvDiskDir
+        // and only pays off for repeated prefixes, so it is opt-in.
+        var kvDiskEnabled = false
         var kvDiskDir = "/tmp/ds4-kv"
         var kvDiskSpaceMB = 131_072
         var kvCacheMinTokens = 512
@@ -143,6 +146,7 @@ final class ServerConfiguration {
 
     private static let configKey = "dsmenubar.config"
     private static let performanceDisplayKey = "dsmenubar.showPerformanceInMenuBar"
+    private static let keepAwakeKey = "dsmenubar.keepAwakeWhileServerRuns"
 
     var needsInitialSetup: Bool {
         guard defaults.object(forKey: Self.configKey) != nil else { return true }
@@ -218,6 +222,13 @@ final class ServerConfiguration {
     func setShowsPerformanceInMenuBar(_ requested: Bool) {
         showsPerformanceInMenuBar = requested
         defaults.set(requested, forKey: Self.performanceDisplayKey)
+    }
+
+    /// Persist the keep-awake preference immediately, on the same terms: it is
+    /// an app behavior, not part of ds4-server's command line.
+    func setKeepsAwakeWhileRunning(_ requested: Bool) {
+        keepsAwakeWhileRunning = requested
+        defaults.set(requested, forKey: Self.keepAwakeKey)
     }
 
     /// Persist the current configuration and apply launch-at-login. Login-item

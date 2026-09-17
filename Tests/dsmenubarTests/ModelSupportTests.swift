@@ -516,6 +516,37 @@ final class ModelSupportTests: XCTestCase {
         XCTAssertFalse(unknownArgs.contains("--vision"))
     }
 
+    func testQwenWithEmbeddedWeightsDefaultsToAutomaticMTP() {
+        let qwen = DS4ModelProfile(
+            family: .qwen38,
+            architecture: "qwen4exp",
+            contextLength: 262_144,
+            nextnPredictLayers: 2
+        )
+
+        let selected = ServerConfiguration.Config()
+            .selectingModel(path: "/tmp/qwen.gguf", profile: qwen)
+
+        XCTAssertEqual(selected.mtpMode, .embedded)
+        XCTAssertEqual(selected.qwenMTPDepth, .automatic)
+
+        var customized = selected
+        customized.mtpMode = .off
+        customized.qwenMTPDepth = .twoDrafts
+        let restored = customized.restoringTuningDefaults(for: qwen)
+        XCTAssertEqual(restored.mtpMode, .embedded)
+        XCTAssertEqual(restored.qwenMTPDepth, .automatic)
+
+        let withoutEmbeddedWeights = DS4ModelProfile(
+            family: .qwen38,
+            architecture: "qwen4exp",
+            contextLength: 262_144
+        )
+        let unsupported = ServerConfiguration.Config()
+            .selectingModel(path: "/tmp/qwen-without-mtp.gguf", profile: withoutEmbeddedWeights)
+        XCTAssertEqual(unsupported.mtpMode, .off)
+    }
+
     func testDSparkCommandUsesOnlyDSparkOptions() {
         var config = ServerConfiguration.Config()
         config.mtpMode = .dspark

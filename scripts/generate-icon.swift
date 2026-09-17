@@ -1,7 +1,5 @@
 // SPDX-FileCopyrightText: Copyright 2026 James Martin
 // SPDX-License-Identifier: MIT
-
-#!/usr/bin/env swift
 //
 // Generates Resources/AppIcon.icns for DS Menu Bar: the app's ✦ star glyph in
 // white on a rounded-rect indigo-to-purple gradient, following the macOS icon

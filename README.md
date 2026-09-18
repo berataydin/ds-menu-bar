@@ -17,7 +17,7 @@ DS Menu Bar manages one Metal server on the Mac where the app is running. It
 does not manage remote, distributed, Linux, CUDA, or ROCm servers.
 
 <p align="center">
-  <img src="docs/images/menu-bar-menu.png" width="327" alt="DS Menu Bar menu showing generation speed in the menu bar, server status, and controls">
+  <img src="docs/images/menu-bar-menu.png" width="325" alt="DS Menu Bar menu showing generation speed, server status, and the Keep Awake While Server Runs control">
 </p>
 
 ## What it does
